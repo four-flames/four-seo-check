@@ -122,3 +122,190 @@ func truncateStr(s string, maxLen int) string {
 	}
 	return strings.TrimRight(truncated, "\x80\xBF\xC0\xE0\xF0") + "..."
 }
+
+// WriteMarkdown writes a comprehensive SEO audit report in Markdown format.
+func WriteMarkdown(w io.Writer, audit model.SEOAuditResult) error {
+	var b strings.Builder
+
+	// ---- HEADER ----
+	b.WriteString("# 🔍 SEO Audit Report\n\n")
+	fmt.Fprintf(&b, "| | |\n")
+	fmt.Fprintf(&b, "|---|---|\n")
+	fmt.Fprintf(&b, "| **URL** | %s |\n", audit.StartURL)
+	fmt.Fprintf(&b, "| **Date** | %s |\n", audit.FinishedAt.Format("2006-01-02 15:04:05 MST"))
+	fmt.Fprintf(&b, "| **Run ID** | %s |\n", audit.RunID)
+	fmt.Fprintf(&b, "\n")
+
+	// ---- SCORECARD ----
+	var errors, warnings, infos int
+	for _, rr := range audit.RuleResults {
+		switch rr.Severity {
+		case model.SeverityError: errors++
+		case model.SeverityWarning: warnings++
+		case model.SeverityInfo: infos++
+		}
+	}
+	score := 100 - errors*5 - warnings*2 - infos
+	if score < 0 { score = 0 }
+
+	b.WriteString("## 📊 Scorecard\n\n")
+	fmt.Fprintf(&b, "| Metric | Count |\n")
+	fmt.Fprintf(&b, "|--------|-------|\n")
+	fmt.Fprintf(&b, "| Pages crawled | %d |\n", audit.Stats.PagesCrawled)
+	fmt.Fprintf(&b, "| Links validated | %d |\n", audit.Stats.LinksChecked)
+	fmt.Fprintf(&b, "| Images validated | %d |\n", audit.Stats.ImagesChecked)
+	fmt.Fprintf(&b, "| 🔴 Errors | %d |\n", errors)
+	fmt.Fprintf(&b, "| 🟡 Warnings | %d |\n", warnings)
+	fmt.Fprintf(&b, "| 🔵 Info | %d |\n", infos)
+	fmt.Fprintf(&b, "| 4xx responses | %d |\n", audit.Stats.Status4xx)
+	fmt.Fprintf(&b, "| 5xx responses | %d |\n", audit.Stats.Status5xx)
+	fmt.Fprintf(&b, "| ⏱ Timeouts | %d |\n", audit.Stats.Timeouts)
+	fmt.Fprintf(&b, "| Internal broken | %d |\n", audit.Stats.InternalBroken)
+	fmt.Fprintf(&b, "| External broken | %d |\n", audit.Stats.ExternalBroken)
+	fmt.Fprintf(&b, "| **Health score** | **%d/100** |\n", score)
+	b.WriteString("\n---\n\n")
+
+	// ---- FINDINGS BY CATEGORY ----
+	b.WriteString("## 📋 Findings by Category\n\n")
+
+	// Broken Links
+	if len(audit.Findings) > 0 {
+		b.WriteString("### 🔗 Broken Links & Images\n\n")
+		fmt.Fprintf(&b, "| # | Source | Target | Type | Status | Error |\n")
+		fmt.Fprintf(&b, "|---|--------|--------|------|--------|-------|\n")
+		for i, f := range audit.Findings {
+			fmt.Fprintf(&b, "| %d | %s | %s | %s | %d | %s |\n",
+				i+1,
+				escapeMD(truncateStr(f.SourceURL, 45)),
+				escapeMD(truncateStr(f.TargetURL, 45)),
+				f.TargetType, f.StatusCode, f.ErrorClass)
+		}
+		b.WriteString("\n")
+	}
+
+	// Group rule results by category for the remaining sections
+	byCategory := map[model.IssueCategory][]model.RuleResult{}
+	for _, rr := range audit.RuleResults {
+		byCategory[rr.Category] = append(byCategory[rr.Category], rr)
+	}
+
+	// Write a section for each category of SEO issues
+	writeIssueSection := func(title, emoji string, codes []model.IssueCode) {
+		var matches []model.RuleResult
+		codeSet := make(map[model.IssueCode]bool)
+		for _, c := range codes { codeSet[c] = true }
+		for _, rr := range audit.RuleResults {
+			if codeSet[rr.Code] {
+				matches = append(matches, rr)
+			}
+		}
+		if len(matches) == 0 { return }
+		fmt.Fprintf(&b, "### %s %s\n\n", emoji, title)
+		fmt.Fprintf(&b, "| Severity | Page | Issue |\n")
+		fmt.Fprintf(&b, "|----------|------|-------|\n")
+		for _, rr := range matches {
+			sev := string(rr.Severity)
+			switch rr.Severity {
+			case model.SeverityError: sev = "🔴 error"
+			case model.SeverityWarning: sev = "🟡 warning"
+			case model.SeverityInfo: sev = "🔵 info"
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s |\n",
+				sev,
+				escapeMD(truncateStr(rr.SourceURL, 40)),
+				rr.Message)
+		}
+		b.WriteString("\n")
+	}
+
+	writeIssueSection("Title Tags", "📝", []model.IssueCode{
+		model.CodeTitleMissing, model.CodeTitleTooShort, model.CodeTitleTooLong,
+	})
+	writeIssueSection("Meta Descriptions", "📄", []model.IssueCode{
+		model.CodeMetaDescMissing, model.CodeMetaDescTooShort, model.CodeMetaDescTooLong,
+	})
+	writeIssueSection("Heading Structure", "🔤", []model.IssueCode{
+		model.CodeH1Missing, model.CodeH1Multiple, model.CodeHeadingHierarchySkip,
+	})
+	writeIssueSection("Image Alt Text", "🖼️", []model.IssueCode{
+		model.CodeImageAltMissing,
+	})
+	writeIssueSection("Canonical Tags", "🔄", []model.IssueCode{
+		model.CodeCanonicalMissing,
+	})
+	writeIssueSection("Robots Directives", "🤖", []model.IssueCode{
+		model.CodeRobotsNoindex,
+	})
+	writeIssueSection("Structured Data", "📊", []model.IssueCode{
+		model.CodeStructuredDataInvalid,
+	})
+
+	b.WriteString("---\n\n")
+
+	// ---- PER-PAGE AUDIT ----
+	b.WriteString("## 📄 Per-Page Audit\n\n")
+	for i, p := range audit.Pages {
+		fmt.Fprintf(&b, "### %d. %s\n\n", i+1, p.URL)
+
+		// Status badges
+		statusBadge := "✅"
+		if p.StatusCode >= 400 { statusBadge = "❌" }
+		noindexBadge := ""
+		if p.HasNoindex { noindexBadge = " ⛔ noindex" }
+
+		fmt.Fprintf(&b, "| | |\n")
+		fmt.Fprintf(&b, "|---|---|\n")
+		fmt.Fprintf(&b, "| Status | %s %d%s |\n", statusBadge, p.StatusCode, noindexBadge)
+		fmt.Fprintf(&b, "| Title (%d) | %s |\n", p.TitleLength, escapeMD(truncateStr(p.Title, 70)))
+		fmt.Fprintf(&b, "| Meta description (%d) | %s |\n", p.MetaDescLength, escapeMD(truncateStr(p.MetaDescription, 70)))
+		fmt.Fprintf(&b, "| H1 count | %d |\n", p.H1Count)
+		if len(p.Headings) > 0 {
+			b.WriteString("| Headings | ")
+			for i, h := range p.Headings {
+				if i > 0 { b.WriteString(" → ") }
+				fmt.Fprintf(&b, "**H%d** %s", h.Level, escapeMD(truncateStr(h.Text, 30)))
+			}
+			b.WriteString(" |\n")
+		}
+		fmt.Fprintf(&b, "| Canonical | %s |\n", escapeMD(orNA(p.CanonicalURL)))
+		fmt.Fprintf(&b, "| Robots | %s |\n", orNA(p.RobotsMeta))
+		fmt.Fprintf(&b, "| Images without alt | %d |\n", p.ImagesWithoutAlt)
+		fmt.Fprintf(&b, "| OG title | %s |\n", escapeMD(orNA(p.OpenGraph.Title)))
+		fmt.Fprintf(&b, "| OG description | %s |\n", escapeMD(orNA(p.OpenGraph.Description)))
+		fmt.Fprintf(&b, "| OG image | %s |\n", escapeMD(orNA(p.OpenGraph.Image)))
+		fmt.Fprintf(&b, "| Structured data | ")
+		if len(p.StructuredData) > 0 {
+			types := make([]string, 0)
+			for _, sd := range p.StructuredData {
+				s := sd.Type
+				if !sd.Valid { s = "❌ " + s }
+				types = append(types, s)
+			}
+			b.WriteString(strings.Join(types, ", "))
+		} else {
+			b.WriteString("—")
+		}
+		b.WriteString(" |\n")
+		fmt.Fprintf(&b, "| Internal links | %d |\n", p.InternalLinksCount)
+		fmt.Fprintf(&b, "| External links | %d |\n", p.ExternalLinksCount)
+		fmt.Fprintf(&b, "| Word count | %d |\n", p.WordCount)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("---\n\n*Report generated by **seoctl** · four-seo-check*\n")
+	_, err := w.Write([]byte(b.String()))
+	return err
+}
+
+// orNA returns the string or "—" if empty.
+func orNA(s string) string {
+	if s == "" { return "—" }
+	return s
+}
+
+// escapeMD escapes pipe characters in markdown table cells.
+func escapeMD(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}

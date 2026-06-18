@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -67,10 +66,15 @@ func Parse() (*Config, error) {
 }
 
 func parseCrawl() (*Config, error) {
-	fs := flag.NewFlagSet("crawl", flag.ExitOnError)
+	fs := flag.NewFlagSet("crawl", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: seoctl crawl [url] [flags]\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: seoctl crawl [flags] <url>\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  seoctl crawl https://example.com\n")
+		fmt.Fprintf(os.Stderr, "  seoctl crawl --max-depth 3 --format md https://example.com\n")
+		fmt.Fprintf(os.Stderr, "  seoctl crawl https://example.com --check-external --format json\n")
 	}
 
 	cfg := &Config{}
@@ -78,34 +82,46 @@ func parseCrawl() (*Config, error) {
 	fs.IntVar(&cfg.MaxDepth, "max-depth", 3, "Maximum crawl depth")
 	fs.IntVar(&cfg.MaxPages, "max-pages", 1000, "Maximum pages to crawl")
 	fs.IntVar(&cfg.Concurrency, "concurrency", 10, "Number of concurrent workers")
-	fs.BoolVar(&cfg.CheckExternal, "check-external", false, "Check external links")
-	fs.StringVar(&cfg.Format, "format", "table", "Output format: table, json, csv")
-	fs.StringVar(&cfg.OutputFile, "output", "", "Output file (stdout if empty)")
-	fs.StringVar(&cfg.UserAgent, "user-agent", "RedFlameSEO/0.1", "User-Agent header")
-	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Request timeout per URL")
-	fs.BoolVar(&cfg.RespectRobots, "respect-robots", false, "Respect robots.txt")
+	fs.BoolVar(&cfg.CheckExternal, "check-external", false, "Check external links (validate only, don't crawl)")
+	fs.StringVar(&cfg.Format, "format", "table", "Output format: table, json, csv, md")
+	fs.StringVar(&cfg.OutputFile, "output", "", "Output file path (stdout if empty)")
+	fs.StringVar(&cfg.UserAgent, "user-agent", "RedFlameSEO/0.1", "User-Agent header value")
+	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Request timeout per URL (e.g. 10s, 30s)")
+	fs.BoolVar(&cfg.RespectRobots, "respect-robots", false, "Respect robots.txt (not yet implemented)")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable debug logging")
 
-	// Build args for the flag set (skip "seoctl crawl")
-	var crawlArgs []string
-	for i, a := range os.Args {
-		if i < 2 {
-			continue
+	// Get crawl args (os.Args after "seoctl crawl")
+	crawlArgs := os.Args[2:]
+
+	// Separate URL from flag args — detect URL by known scheme prefix
+	var urlArg string
+	var flagArgs []string
+	for _, arg := range crawlArgs {
+		if urlArg == "" && (strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") || strings.HasPrefix(arg, "ftp://") || strings.HasPrefix(arg, "ftps://")) {
+			urlArg = arg
+		} else {
+			flagArgs = append(flagArgs, arg)
 		}
-		crawlArgs = append(crawlArgs, a)
 	}
 
-	if err := fs.Parse(crawlArgs); err != nil {
+	// Parse only flag args
+	if err := fs.Parse(flagArgs); err != nil {
 		return nil, err
 	}
 
-	// URL is the first positional arg after flags
-	args := fs.Args()
-	if len(args) == 0 {
+	// URL is required — safety net for args not detected as URL (e.g. /relative/path)
+	if urlArg == "" {
+		if len(flagArgs) > 0 {
+			// Treat the first remaining non-flag arg as URL for validation
+			cfg.StartURL = flagArgs[0]
+			if err := cfg.validate(); err != nil {
+				return nil, err
+			}
+		}
 		fs.Usage()
 		return nil, nil
 	}
-	cfg.StartURL = args[0]
+	cfg.StartURL = urlArg
 
 	// Validate
 	if err := cfg.validate(); err != nil {
@@ -126,18 +142,18 @@ func (c *Config) validate() error {
 	}
 
 	if c.Concurrency < 1 {
-		return errors.New("concurrency must be >= 1")
+		return fmt.Errorf("concurrency must be >= 1")
 	}
 
 	if c.MaxDepth < 0 {
-		return errors.New("max-depth must be >= 0")
+		return fmt.Errorf("max-depth must be >= 0")
 	}
 
 	switch strings.ToLower(c.Format) {
-	case "table", "json", "csv":
+	case "table", "json", "csv", "md":
 		c.Format = strings.ToLower(c.Format)
 	default:
-		return fmt.Errorf("invalid format %q: must be table, json, or csv", c.Format)
+		return fmt.Errorf("invalid format %q: must be table, json, csv, or md", c.Format)
 	}
 
 	return nil

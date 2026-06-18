@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"encoding/json"
 	"net/url"
 	"strings"
 
@@ -201,4 +202,239 @@ func hasNofollow(n *html.Node) bool {
 		}
 	}
 	return false
+}
+
+// Headings extracts all h1-h6 elements with their text content.
+func Headings(doc *html.Node) []model.Heading {
+	var headings []model.Heading
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			level := headingLevel(n.Data)
+			if level > 0 {
+				headings = append(headings, model.Heading{
+					Level: level,
+					Text:  strings.TrimSpace(extractText(n)),
+				})
+				return // Don't recurse into headings
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return headings
+}
+
+func headingLevel(tag string) int {
+	switch tag {
+	case "h1":
+		return 1
+	case "h2":
+		return 2
+	case "h3":
+		return 3
+	case "h4":
+		return 4
+	case "h5":
+		return 5
+	case "h6":
+		return 6
+	}
+	return 0
+}
+
+// CanonicalURL extracts the canonical URL from <link rel="canonical" href="...">
+func CanonicalURL(doc *html.Node) string {
+	var canonical string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "link" {
+			rel := strings.ToLower(getAttr(n, "rel"))
+			if rel == "canonical" {
+				canonical = getAttr(n, "href")
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return canonical
+}
+
+// RobotsMeta extracts the content of <meta name="robots" content="...">
+func RobotsMeta(doc *html.Node) string {
+	var robots string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			if strings.ToLower(getAttr(n, "name")) == "robots" {
+				robots = getAttr(n, "content")
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return robots
+}
+
+// StructuredDataScripts extracts all JSON-LD script blocks.
+func StructuredDataScripts(doc *html.Node) []model.StructuredDataItem {
+	var items []model.StructuredDataItem
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "script" {
+			typ := strings.ToLower(getAttr(n, "type"))
+			if typ == "application/ld+json" {
+				item := model.StructuredDataItem{Raw: extractText(n)}
+				// Parse JSON to extract @type
+				var data map[string]interface{}
+				if err := json.Unmarshal([]byte(item.Raw), &data); err == nil {
+					if t, ok := data["@type"]; ok {
+						switch v := t.(type) {
+						case string:
+							item.Type = v
+						case []interface{}:
+							types := make([]string, 0, len(v))
+							for _, tv := range v {
+								if s, ok := tv.(string); ok {
+									types = append(types, s)
+								}
+							}
+							item.Type = strings.Join(types, ", ")
+						}
+					}
+					item.Valid = true
+				} else {
+					item.Error = err.Error()
+				}
+				items = append(items, item)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return items
+}
+
+// OpenGraphTags extracts Open Graph meta tags.
+func OpenGraphTags(doc *html.Node) model.OpenGraph {
+	og := model.OpenGraph{}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			property := strings.ToLower(getAttr(n, "property"))
+			content := getAttr(n, "content")
+			switch property {
+			case "og:title":
+				og.Title = content
+			case "og:description":
+				og.Description = content
+			case "og:image":
+				og.Image = content
+			case "og:url":
+				og.URL = content
+			case "og:type":
+				og.Type = content
+			case "og:site_name":
+				og.SiteName = content
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return og
+}
+
+// Viewport extracts the viewport meta content.
+func Viewport(doc *html.Node) string {
+	var vp string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			if strings.ToLower(getAttr(n, "name")) == "viewport" {
+				vp = getAttr(n, "content")
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return vp
+}
+
+// CharsetMeta extracts charset from meta tag.
+func CharsetMeta(doc *html.Node) string {
+	var charset string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			if getAttr(n, "charset") != "" {
+				charset = getAttr(n, "charset")
+				return
+			}
+			if strings.ToLower(getAttr(n, "http-equiv")) == "content-type" {
+				content := getAttr(n, "content")
+				if idx := strings.Index(content, "charset="); idx >= 0 {
+					charset = content[idx+8:]
+					return
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return charset
+}
+
+// SrcSetURLs extracts all URLs from srcset attributes on <img> and <source> elements.
+func SrcSetURLs(doc *html.Node, baseURL *url.URL) []string {
+	var urls []string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			srcset := getAttr(n, "srcset")
+			if srcset != "" {
+				// Parse srcset: "url1 1x, url2 2x" or "url1 400w, url2 800w"
+				parts := strings.Split(srcset, ",")
+				for _, part := range parts {
+					part = strings.TrimSpace(part)
+					// Split by whitespace, first part is URL
+					fields := strings.Fields(part)
+					if len(fields) > 0 {
+						resolved, err := resolveURL(baseURL, fields[0])
+						if err == nil && resolved != "" {
+							urls = append(urls, resolved)
+						}
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return urls
+}
+
+// WordCount estimates word count from visible text.
+func WordCount(doc *html.Node) int {
+	text := extractText(doc)
+	words := strings.Fields(text)
+	return len(words)
 }
