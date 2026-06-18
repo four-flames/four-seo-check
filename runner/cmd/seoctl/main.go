@@ -73,6 +73,12 @@ func main() {
 			logger.Error("failed to write CSV output", "error", err)
 			os.Exit(2)
 		}
+	case "md":
+		auditResult := crawler.AuditResult()
+		if err := output.WriteMarkdown(w, auditResult); err != nil {
+			logger.Error("failed to write Markdown output", "error", err)
+			os.Exit(2)
+		}
 	default:
 		if err := output.WriteTable(w, *result); err != nil {
 			logger.Error("failed to write table output", "error", err)

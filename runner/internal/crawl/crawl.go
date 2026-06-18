@@ -16,6 +16,7 @@ import (
 	"github.com/four-flames/four-seo-check/runner/internal/model"
 	"github.com/four-flames/four-seo-check/runner/internal/normalize"
 	"github.com/four-flames/four-seo-check/runner/internal/report"
+	"github.com/four-flames/four-seo-check/runner/internal/rules"
 	"github.com/four-flames/four-seo-check/runner/internal/validate"
 	"golang.org/x/net/html"
 	"golang.org/x/time/rate"
@@ -40,6 +41,9 @@ type Crawler struct {
 
 	seen   map[string]bool
 	seenMu sync.Mutex
+
+	seoAuditPages []model.SEOAuditPage
+	seoMu         sync.Mutex
 }
 
 // New creates a new Crawler from configuration.
@@ -223,6 +227,52 @@ func (c *Crawler) worker(
 			}
 			c.collector.AddPage(page)
 
+			// Build SEO audit data for this page
+			seoPage := model.SEOAuditPage{
+				URL:                item.url,
+				StatusCode:         resp.StatusCode,
+				Title:              extract.Title(doc),
+				TitleLength:        len(extract.Title(doc)),
+				MetaDescription:    extract.MetaDescription(doc),
+				MetaDescLength:     len(extract.MetaDescription(doc)),
+				Headings:           extract.Headings(doc),
+				Images:             refsToURLs(images),
+				CanonicalURL:       extract.CanonicalURL(doc),
+				RobotsMeta:         extract.RobotsMeta(doc),
+				StructuredData:     extract.StructuredDataScripts(doc),
+				OpenGraph:          extract.OpenGraphTags(doc),
+				Viewport:           extract.Viewport(doc),
+				Charset:            extract.CharsetMeta(doc),
+				WordCount:          extract.WordCount(doc),
+				InternalLinksCount: countInternalLinks(links, host),
+				ExternalLinksCount: countExternalLinks(links, host),
+				ImagesWithoutAlt:   countImagesWithoutAlt(images),
+			}
+
+			// H1 count
+			for _, h := range seoPage.Headings {
+				if h.Level == 1 {
+					seoPage.H1Count++
+				}
+			}
+
+			// Self-canonical check
+			if seoPage.CanonicalURL != "" {
+				canonURL, err := url.Parse(seoPage.CanonicalURL)
+				if err == nil {
+					normalizedCanon, _ := normalize.Normalize(canonURL.String())
+					normalizedPage, _ := normalize.Normalize(item.url)
+					seoPage.IsSelfCanonical = normalizedCanon == normalizedPage
+				}
+			}
+
+			// Noindex check
+			seoPage.HasNoindex = strings.Contains(strings.ToLower(seoPage.RobotsMeta), "noindex")
+
+			c.seoMu.Lock()
+			c.seoAuditPages = append(c.seoAuditPages, seoPage)
+			c.seoMu.Unlock()
+
 			// Validate links
 			for _, ref := range links {
 				ref.Depth = item.depth
@@ -310,4 +360,176 @@ func refsToURLs(refs []model.DiscoveredReference) []string {
 		urls[i] = r.TargetURL
 	}
 	return urls
+}
+
+func countInternalLinks(refs []model.DiscoveredReference, host string) int {
+	count := 0
+	for _, r := range refs {
+		u, err := url.Parse(r.TargetURL)
+		if err == nil && u.Host == host {
+			count++
+		}
+	}
+	return count
+}
+
+func countExternalLinks(refs []model.DiscoveredReference, host string) int {
+	count := 0
+	for _, r := range refs {
+		u, err := url.Parse(r.TargetURL)
+		if err == nil && u.Host != host && u.Host != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countImagesWithoutAlt(refs []model.DiscoveredReference) int {
+	count := 0
+	for _, r := range refs {
+		if r.AnchorText == "" {
+			count++
+		}
+	}
+	return count
+}
+
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// AuditResult builds the full SEO audit result after crawling completes.
+func (c *Crawler) AuditResult() model.SEOAuditResult {
+	result := c.collector.Result()
+	_ = rules.NewEngine()
+
+	audit := model.SEOAuditResult{
+		RunID:      result.RunID,
+		StartURL:   result.StartURL,
+		StartedAt:  result.StartedAt,
+		FinishedAt: result.FinishedAt,
+		Pages:      c.seoAuditPages,
+		Findings:   result.Findings,
+		Stats:      result.Stats,
+	}
+
+	// Run rules against each SEO audit page
+	for _, page := range c.seoAuditPages {
+		// Title checks
+		if page.Title == "" {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeTitleMissing, Category: model.CategorySEO,
+				Severity: model.SeverityError, SourceURL: page.URL,
+				Message: "Title tag is missing",
+			})
+		} else if len(page.Title) < 30 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeTitleTooShort, Category: model.CategorySEO,
+				Severity: model.SeverityWarning, SourceURL: page.URL,
+				Message: fmt.Sprintf("Title too short (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
+			})
+		} else if len(page.Title) > 60 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeTitleTooLong, Category: model.CategorySEO,
+				Severity: model.SeverityWarning, SourceURL: page.URL,
+				Message: fmt.Sprintf("Title too long (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
+			})
+		}
+
+		// Meta description checks
+		if page.MetaDescription == "" {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeMetaDescMissing, Category: model.CategorySEO,
+				Severity: model.SeverityWarning, SourceURL: page.URL,
+				Message: "Meta description is missing",
+			})
+		} else if len(page.MetaDescription) < 70 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeMetaDescTooShort, Category: model.CategorySEO,
+				Severity: model.SeverityInfo, SourceURL: page.URL,
+				Message: fmt.Sprintf("Meta description too short (%d chars)", len(page.MetaDescription)),
+			})
+		} else if len(page.MetaDescription) > 160 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeMetaDescTooLong, Category: model.CategorySEO,
+				Severity: model.SeverityInfo, SourceURL: page.URL,
+				Message: fmt.Sprintf("Meta description too long (%d chars)", len(page.MetaDescription)),
+			})
+		}
+
+		// H1 checks
+		if page.H1Count == 0 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeH1Missing, Category: model.CategorySEO,
+				Severity: model.SeverityError, SourceURL: page.URL,
+				Message: "No H1 tag found on page",
+			})
+		} else if page.H1Count > 1 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeH1Multiple, Category: model.CategorySEO,
+				Severity: model.SeverityError, SourceURL: page.URL,
+				Message: fmt.Sprintf("Multiple H1 tags found (%d)", page.H1Count),
+			})
+		}
+
+		// Heading hierarchy check
+		if len(page.Headings) >= 2 {
+			prevLevel := page.Headings[0].Level
+			for i := 1; i < len(page.Headings); i++ {
+				currLevel := page.Headings[i].Level
+				if currLevel > prevLevel+1 {
+					audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+						Code: model.CodeHeadingHierarchySkip, Category: model.CategorySEO,
+						Severity: model.SeverityWarning, SourceURL: page.URL,
+						Message: fmt.Sprintf("Heading level skipped: H%d → H%d", prevLevel, currLevel),
+					})
+					break
+				}
+				prevLevel = currLevel
+			}
+		}
+
+		// Canonical check
+		if page.CanonicalURL == "" {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeCanonicalMissing, Category: model.CategorySEO,
+				Severity: model.SeverityInfo, SourceURL: page.URL,
+				Message: "Canonical URL is missing",
+			})
+		}
+
+		// Robots noindex
+		if page.HasNoindex {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeRobotsNoindex, Category: model.CategorySEO,
+				Severity: model.SeverityWarning, SourceURL: page.URL,
+				Message: "Page has noindex directive",
+			})
+		}
+
+		// Structured data validation
+		for _, sd := range page.StructuredData {
+			if !sd.Valid {
+				audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+					Code: model.CodeStructuredDataInvalid, Category: model.CategorySEO,
+					Severity: model.SeverityError, SourceURL: page.URL,
+					Message: fmt.Sprintf("Invalid JSON-LD structured data: %s", sd.Error),
+				})
+			}
+		}
+
+		// Image alt text
+		if page.ImagesWithoutAlt > 0 {
+			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
+				Code: model.CodeImageAltMissing, Category: model.CategoryImages,
+				Severity: model.SeverityWarning, SourceURL: page.URL,
+				Message: fmt.Sprintf("%d image(s) missing alt text", page.ImagesWithoutAlt),
+			})
+		}
+	}
+
+	return audit
 }
