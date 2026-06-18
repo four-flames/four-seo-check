@@ -55,6 +55,9 @@ type Crawler struct {
 
 	seen   map[string]bool
 	seenMu sync.Mutex
+
+	validated   map[string]bool
+	validatedMu sync.Mutex
 }
 
 // New creates a new Crawler from configuration.
@@ -80,6 +83,7 @@ func New(cfg config.Config, logger *slog.Logger, progressWriter *model.SafeWrite
 		progressWriter: progressWriter,
 		stats:          &crawlStats{},
 		seen:           make(map[string]bool),
+		validated:      make(map[string]bool),
 	}
 }
 
@@ -305,6 +309,18 @@ func (c *Crawler) worker(
 				ref.Depth = item.depth
 				ref.SourceURL = item.url
 
+				// Dedup: skip if already validated
+				normTarget, err := normalize.Normalize(ref.TargetURL)
+				if err == nil {
+					c.validatedMu.Lock()
+					if c.validated[normTarget] {
+						c.validatedMu.Unlock()
+						continue
+					}
+					c.validated[normTarget] = true
+					c.validatedMu.Unlock()
+				}
+
 				finding := c.validator.ValidateImage(ctx, ref, c.runID)
 				if finding != nil {
 					// Write finding to progress file immediately
@@ -339,6 +355,18 @@ func (c *Crawler) worker(
 			for _, ref := range links {
 				ref.Depth = item.depth
 				ref.SourceURL = item.url
+
+				// Dedup: skip if already validated
+				normTarget, err := normalize.Normalize(ref.TargetURL)
+				if err == nil {
+					c.validatedMu.Lock()
+					if c.validated[normTarget] {
+						c.validatedMu.Unlock()
+						continue
+					}
+					c.validated[normTarget] = true
+					c.validatedMu.Unlock()
+				}
 
 				if ref.TargetType == model.TargetExternalLink {
 					// Only validate external if enabled
