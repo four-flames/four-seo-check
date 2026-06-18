@@ -104,9 +104,11 @@ func (c *Crawler) Run(ctx context.Context) (*model.CrawlResult, error) {
 	case <-ctx.Done():
 	}
 
+	// Close queue to signal no more items - this unblocks workers after they finish processing
+	close(queue)
+
 	// Wait for all workers to finish
 	wg.Wait()
-	close(queue)
 
 	c.client.CloseIdleConnections()
 	result := c.collector.Result()
@@ -231,6 +233,12 @@ func (c *Crawler) worker(
 					finding := c.validator.ValidateLink(ctx, ref, c.runID)
 					if finding != nil {
 						c.collector.AddFinding(*finding)
+						c.logger.Warn("broken link found",
+							"source", ref.SourceURL,
+							"target", finding.TargetURL,
+							"status", finding.StatusCode,
+							"error", finding.ErrorClass,
+						)
 					}
 				}
 				continue
@@ -240,6 +248,12 @@ func (c *Crawler) worker(
 			finding := c.validator.ValidateLink(ctx, ref, c.runID)
 			if finding != nil {
 				c.collector.AddFinding(*finding)
+				c.logger.Warn("broken link found",
+					"source", ref.SourceURL,
+					"target", finding.TargetURL,
+					"status", finding.StatusCode,
+					"error", finding.ErrorClass,
+				)
 			}
 
 			// Enqueue for crawling (same host)
@@ -253,6 +267,8 @@ func (c *Crawler) worker(
 			if sourceURL != nil && targetURL.Host == sourceURL.Host {
 				select {
 				case send <- queueItem{url: ref.TargetURL, depth: item.depth + 1}:
+				default:
+					// Queue full — URL will be discovered via another path
 				case <-ctx.Done():
 					return
 				}
@@ -267,8 +283,22 @@ func (c *Crawler) worker(
 			finding := c.validator.ValidateImage(ctx, ref, c.runID)
 			if finding != nil {
 				c.collector.AddFinding(*finding)
+				c.logger.Warn("broken image found",
+					"source", ref.SourceURL,
+					"target", finding.TargetURL,
+					"status", finding.StatusCode,
+					"error", finding.ErrorClass,
+				)
 			}
 		}
+
+		// Log per-page summary
+		c.logger.Info("page crawled",
+			"url", item.url,
+			"depth", item.depth,
+			"links", len(links),
+			"images", len(images),
+		)
 	}
 }
 
