@@ -80,10 +80,10 @@ func parseCrawl() (*Config, error) {
 	cfg := &Config{}
 
 	fs.IntVar(&cfg.MaxDepth, "max-depth", 3, "Maximum crawl depth")
-	fs.IntVar(&cfg.MaxPages, "max-pages", 1000, "Maximum pages to crawl")
+	fs.IntVar(&cfg.MaxPages, "max-pages", 50000, "Maximum pages to crawl")
 	fs.IntVar(&cfg.Concurrency, "concurrency", 10, "Number of concurrent workers")
 	fs.BoolVar(&cfg.CheckExternal, "check-external", false, "Check external links (validate only, don't crawl)")
-	fs.StringVar(&cfg.Format, "format", "table", "Output format: table, json, csv, md")
+	fs.StringVar(&cfg.Format, "format", "md", "Output format: table, json, csv, md")
 	fs.StringVar(&cfg.OutputFile, "output", "", "Output file path (stdout if empty)")
 	fs.StringVar(&cfg.UserAgent, "user-agent", "RedFlameSEO/0.1", "User-Agent header value")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Request timeout per URL (e.g. 10s, 30s)")
@@ -122,6 +122,11 @@ func parseCrawl() (*Config, error) {
 		return nil, nil
 	}
 	cfg.StartURL = urlArg
+
+	// Default output file: seo-audit-YYYY-MM-DD-HHmmss.md
+	if cfg.OutputFile == "" && cfg.Format == "md" {
+		cfg.OutputFile = "seo-audit-" + time.Now().Format("2006-01-02-150405") + ".md"
+	}
 
 	// Validate
 	if err := cfg.validate(); err != nil {

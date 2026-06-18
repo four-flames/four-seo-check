@@ -33,8 +33,15 @@ func TestParseValidMinimal(t *testing.T) {
 	if cfg.CheckExternal {
 		t.Error("CheckExternal should be false by default")
 	}
-	if cfg.Format != "table" {
-		t.Errorf("Format = %q, want %q", cfg.Format, "table")
+	if cfg.Format != "md" {
+		t.Errorf("Format = %q, want %q", cfg.Format, "md")
+	}
+	// When format is md and no output file is specified, a timestamped default is generated
+	if cfg.OutputFile == "" {
+		t.Error("OutputFile should be set for md format by default")
+	}
+	if cfg.MaxPages != 50000 {
+		t.Errorf("MaxPages = %d, want %d", cfg.MaxPages, 50000)
 	}
 }
 
