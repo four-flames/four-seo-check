@@ -104,11 +104,11 @@ func (c *Crawler) Run(ctx context.Context) (*model.CrawlResult, error) {
 	case <-ctx.Done():
 	}
 
-	// Close queue to signal no more items - this unblocks workers after they finish processing
-	close(queue)
-
 	// Wait for all workers to finish
 	wg.Wait()
+
+	// Safe to close now — all workers have exited
+	close(queue)
 
 	c.client.CloseIdleConnections()
 	result := c.collector.Result()
@@ -125,180 +125,182 @@ func (c *Crawler) worker(
 	pageCount *atomic.Int64,
 	cancelFn context.CancelFunc,
 ) {
-	for item := range recv {
-		// Check context
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
+		case item, ok := <-recv:
+			if !ok {
+				return
+			}
 
-		// Check max depth
-		if item.depth > c.cfg.MaxDepth {
-			continue
-		}
+			// Check max depth
+			if item.depth > c.cfg.MaxDepth {
+				continue
+			}
 
-		// Check max pages
-		if int(pageCount.Load()) >= c.cfg.MaxPages {
-			cancelFn()
-			return
-		}
+			// Check max pages
+			if int(pageCount.Load()) >= c.cfg.MaxPages {
+				cancelFn()
+				return
+			}
 
-		// Normalize and check seen
-		normalized, err := normalize.Normalize(item.url)
-		if err != nil || normalized == "" {
-			continue
-		}
+			// Normalize and check seen
+			normalized, err := normalize.Normalize(item.url)
+			if err != nil || normalized == "" {
+				continue
+			}
 
-		c.seenMu.Lock()
-		if c.seen[normalized] {
+			c.seenMu.Lock()
+			if c.seen[normalized] {
+				c.seenMu.Unlock()
+				continue
+			}
+			c.seen[normalized] = true
 			c.seenMu.Unlock()
-			continue
-		}
-		c.seen[normalized] = true
-		c.seenMu.Unlock()
 
-		// Rate limit
-		if err := limiter.Wait(ctx); err != nil {
-			return
-		}
+			// Rate limit
+			if err := limiter.Wait(ctx); err != nil {
+				return
+			}
 
-		// Fetch page
-		resp, err := c.client.GetFull(ctx, item.url)
-		if err != nil {
-			c.logger.Warn("failed to fetch page", "url", item.url, "error", err)
-			continue
-		}
+			// Fetch page
+			resp, err := c.client.GetFull(ctx, item.url)
+			if err != nil {
+				c.logger.Warn("failed to fetch page", "url", item.url, "error", err)
+				continue
+			}
 
-		finalURL := resp.Request.URL.String()
-		contentType := resp.Header.Get("Content-Type")
+			finalURL := resp.Request.URL.String()
+			contentType := resp.Header.Get("Content-Type")
 
-		// Check content type - only process HTML pages
-		if contentType == "" || !strings.HasPrefix(contentType, "text/html") {
+			// Check content type - only process HTML pages
+			if contentType == "" || !strings.HasPrefix(contentType, "text/html") {
+				resp.Body.Close()
+				continue
+			}
+
+			// Parse HTML
+			doc, err := html.Parse(resp.Body)
 			resp.Body.Close()
-			continue
-		}
+			if err != nil {
+				c.logger.Warn("failed to parse HTML", "url", item.url, "error", err)
+				continue
+			}
 
-		// Parse HTML
-		doc, err := html.Parse(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			c.logger.Warn("failed to parse HTML", "url", item.url, "error", err)
-			continue
-		}
+			// Increment page count
+			currentCount := int(pageCount.Add(1))
 
-		// Increment page count
-		currentCount := int(pageCount.Add(1))
+			// Log progress every 10 pages
+			if currentCount%10 == 0 {
+				c.logger.Info("crawl progress",
+					"pages", currentCount,
+					"current", item.url,
+				)
+			}
 
-		// Log progress every 10 pages
-		if currentCount%10 == 0 {
-			c.logger.Info("crawl progress",
-				"pages", currentCount,
-				"current", item.url,
-			)
-		}
+			// Build base URL for resolving relative URLs
+			baseURL := resp.Request.URL
+			if baseURL == nil {
+				baseURL, _ = url.Parse(item.url)
+			}
 
-		// Build base URL for resolving relative URLs
-		baseURL := resp.Request.URL
-		if baseURL == nil {
-			baseURL, _ = url.Parse(item.url)
-		}
+			// Extract links
+			links := extract.Links(doc, baseURL)
+			images := extract.Images(doc, baseURL)
 
-		// Extract links
-		links := extract.Links(doc, baseURL)
-		images := extract.Images(doc, baseURL)
+			// Collect page info
+			page := model.Page{
+				URL:         item.url,
+				FinalURL:    finalURL,
+				StatusCode:  resp.StatusCode,
+				Depth:       item.depth,
+				ContentType: contentType,
+				Links:       refsToURLs(links),
+				Images:      refsToURLs(images),
+				Title:       extract.Title(doc),
+				MetaDesc:    extract.MetaDescription(doc),
+			}
+			c.collector.AddPage(page)
 
-		// Collect page info
-		page := model.Page{
-			URL:         item.url,
-			FinalURL:    finalURL,
-			StatusCode:  resp.StatusCode,
-			Depth:       item.depth,
-			ContentType: contentType,
-			Links:       refsToURLs(links),
-			Images:      refsToURLs(images),
-			Title:       extract.Title(doc),
-			MetaDesc:    extract.MetaDescription(doc),
-		}
-		c.collector.AddPage(page)
+			// Validate links
+			for _, ref := range links {
+				ref.Depth = item.depth
+				ref.SourceURL = item.url
 
-		// Validate links
-		for _, ref := range links {
-			ref.Depth = item.depth
-			ref.SourceURL = item.url
+				if ref.TargetType == model.TargetExternalLink {
+					// Only validate external if enabled
+					if c.cfg.CheckExternal {
+						finding := c.validator.ValidateLink(ctx, ref, c.runID)
+						if finding != nil {
+							c.collector.AddFinding(*finding)
+							c.logger.Warn("broken link found",
+								"source", ref.SourceURL,
+								"target", finding.TargetURL,
+								"status", finding.StatusCode,
+								"error", finding.ErrorClass,
+							)
+						}
+					}
+					continue
+				}
 
-			if ref.TargetType == model.TargetExternalLink {
-				// Only validate external if enabled
-				if c.cfg.CheckExternal {
-					finding := c.validator.ValidateLink(ctx, ref, c.runID)
-					if finding != nil {
-						c.collector.AddFinding(*finding)
-						c.logger.Warn("broken link found",
-							"source", ref.SourceURL,
-							"target", finding.TargetURL,
-							"status", finding.StatusCode,
-							"error", finding.ErrorClass,
-						)
+				// Internal link: validate
+				finding := c.validator.ValidateLink(ctx, ref, c.runID)
+				if finding != nil {
+					c.collector.AddFinding(*finding)
+					c.logger.Warn("broken link found",
+						"source", ref.SourceURL,
+						"target", finding.TargetURL,
+						"status", finding.StatusCode,
+						"error", finding.ErrorClass,
+					)
+				}
+
+				// Enqueue for crawling (same host)
+				targetURL, err := url.Parse(ref.TargetURL)
+				if err != nil {
+					continue
+				}
+
+				// Check same host
+				sourceURL, _ := url.Parse(item.url)
+				if sourceURL != nil && targetURL.Host == sourceURL.Host {
+					select {
+					case send <- queueItem{url: ref.TargetURL, depth: item.depth + 1}:
+					default:
+						// Queue full — URL will be discovered via another path
+					case <-ctx.Done():
+						return
 					}
 				}
-				continue
 			}
 
-			// Internal link: validate
-			finding := c.validator.ValidateLink(ctx, ref, c.runID)
-			if finding != nil {
-				c.collector.AddFinding(*finding)
-				c.logger.Warn("broken link found",
-					"source", ref.SourceURL,
-					"target", finding.TargetURL,
-					"status", finding.StatusCode,
-					"error", finding.ErrorClass,
-				)
-			}
+			// Validate images
+			for _, ref := range images {
+				ref.Depth = item.depth
+				ref.SourceURL = item.url
 
-			// Enqueue for crawling (same host)
-			targetURL, err := url.Parse(ref.TargetURL)
-			if err != nil {
-				continue
-			}
-
-			// Check same host
-			sourceURL, _ := url.Parse(item.url)
-			if sourceURL != nil && targetURL.Host == sourceURL.Host {
-				select {
-				case send <- queueItem{url: ref.TargetURL, depth: item.depth + 1}:
-				default:
-					// Queue full — URL will be discovered via another path
-				case <-ctx.Done():
-					return
+				finding := c.validator.ValidateImage(ctx, ref, c.runID)
+				if finding != nil {
+					c.collector.AddFinding(*finding)
+					c.logger.Warn("broken image found",
+						"source", ref.SourceURL,
+						"target", finding.TargetURL,
+						"status", finding.StatusCode,
+						"error", finding.ErrorClass,
+					)
 				}
 			}
+
+			// Log per-page summary
+			c.logger.Info("page crawled",
+				"url", item.url,
+				"depth", item.depth,
+				"links", len(links),
+				"images", len(images),
+			)
 		}
-
-		// Validate images
-		for _, ref := range images {
-			ref.Depth = item.depth
-			ref.SourceURL = item.url
-
-			finding := c.validator.ValidateImage(ctx, ref, c.runID)
-			if finding != nil {
-				c.collector.AddFinding(*finding)
-				c.logger.Warn("broken image found",
-					"source", ref.SourceURL,
-					"target", finding.TargetURL,
-					"status", finding.StatusCode,
-					"error", finding.ErrorClass,
-				)
-			}
-		}
-
-		// Log per-page summary
-		c.logger.Info("page crawled",
-			"url", item.url,
-			"depth", item.depth,
-			"links", len(links),
-			"images", len(images),
-		)
 	}
 }
 
