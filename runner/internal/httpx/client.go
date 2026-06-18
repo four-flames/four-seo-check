@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,11 +18,13 @@ type Client struct {
 
 // ClientConfig holds configuration for the HTTP client.
 type ClientConfig struct {
-	UserAgent      string
-	RequestTimeout time.Duration
-	MaxRetries     int
-	RetryDelay     time.Duration
-	MaxBodyBytes   int64
+	UserAgent        string
+	RequestTimeout   time.Duration
+	MaxRetries       int
+	RetryDelay       time.Duration
+	MaxBodyBytes     int64
+	RetryOnRateLimit bool // retry on 429
+	RetryOnServerErr bool // retry on 503
 }
 
 // NewClient creates a new HTTP client with the given configuration.
@@ -93,7 +96,28 @@ func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, maxBody
 			continue
 		}
 
-		// Never retry on 4xx/5xx status codes
+		// Retry on rate limit (429) or service unavailable (503)
+		if (resp.StatusCode == 429 && c.cfg.RetryOnRateLimit) || (resp.StatusCode == 503 && c.cfg.RetryOnServerErr) {
+			resp.Body.Close()
+			if attempt < c.cfg.MaxRetries {
+				// Check Retry-After header
+				delay := c.cfg.RetryDelay * time.Duration(1<<(attempt))
+				if ra := resp.Header.Get("Retry-After"); ra != "" {
+					if seconds, err := strconv.Atoi(ra); err == nil {
+						delay = time.Duration(seconds) * time.Second
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(delay):
+				}
+				continue
+			}
+			return resp, nil
+		}
+
+		// Never retry on other 4xx/5xx status codes
 		if resp.StatusCode >= 400 {
 			// Read limited body for image/content-type detection
 			if maxBody > 0 {

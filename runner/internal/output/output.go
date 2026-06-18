@@ -1,12 +1,14 @@
 package output
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/four-flames/four-seo-check/runner/internal/model"
 )
@@ -308,4 +310,181 @@ func escapeMD(s string) string {
 	s = strings.ReplaceAll(s, "|", "\\|")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return s
+}
+
+// ReadProgressFile reads a JSONL progress file and builds the SEOAuditResult.
+func ReadProgressFile(r io.Reader) (*model.SEOAuditResult, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
+
+	var pages []model.SEOAuditPage
+	var findings []model.Finding
+	var stats model.RunStats
+	var runID, startURL string
+	var startedAt, finishedAt time.Time
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var evt model.CrawlProgress
+		if err := json.Unmarshal(line, &evt); err != nil {
+			continue // skip malformed lines
+		}
+
+		switch evt.Event {
+		case "page":
+			if evt.Page != nil {
+				pages = append(pages, *evt.Page)
+			}
+			if startedAt.IsZero() {
+				startedAt = evt.Timestamp
+			}
+			finishedAt = evt.Timestamp
+		case "finding":
+			if evt.Finding != nil {
+				findings = append(findings, *evt.Finding)
+			}
+		case "complete":
+			if evt.Stats != nil {
+				stats = *evt.Stats
+			}
+			runID = evt.RunID
+			startURL = evt.StartURL
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// Build rule results from pages
+	var ruleResults []model.RuleResult
+	for _, page := range pages {
+		ruleResults = append(ruleResults, evaluatePageRules(page)...)
+	}
+
+	return &model.SEOAuditResult{
+		RunID:       runID,
+		StartURL:    startURL,
+		StartedAt:   startedAt,
+		FinishedAt:  finishedAt,
+		Pages:       pages,
+		Findings:    findings,
+		RuleResults: ruleResults,
+		Stats:       stats,
+	}, nil
+}
+
+// evaluatePageRules runs all SEO rules against a single page.
+func evaluatePageRules(page model.SEOAuditPage) []model.RuleResult {
+	var results []model.RuleResult
+
+	if page.Title == "" {
+		results = append(results, model.RuleResult{
+			Code: model.CodeTitleMissing, Category: model.CategorySEO,
+			Severity: model.SeverityError, SourceURL: page.URL,
+			Message: "Title tag is missing",
+		})
+	} else if len(page.Title) < 30 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeTitleTooShort, Category: model.CategorySEO,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
+			Message: fmt.Sprintf("Title too short (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
+		})
+	} else if len(page.Title) > 60 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeTitleTooLong, Category: model.CategorySEO,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
+			Message: fmt.Sprintf("Title too long (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
+		})
+	}
+
+	if page.MetaDescription == "" {
+		results = append(results, model.RuleResult{
+			Code: model.CodeMetaDescMissing, Category: model.CategorySEO,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
+			Message: "Meta description is missing",
+		})
+	} else if len(page.MetaDescription) < 70 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeMetaDescTooShort, Category: model.CategorySEO,
+			Severity: model.SeverityInfo, SourceURL: page.URL,
+			Message: fmt.Sprintf("Meta description too short (%d chars)", len(page.MetaDescription)),
+		})
+	} else if len(page.MetaDescription) > 160 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeMetaDescTooLong, Category: model.CategorySEO,
+			Severity: model.SeverityInfo, SourceURL: page.URL,
+			Message: fmt.Sprintf("Meta description too long (%d chars)", len(page.MetaDescription)),
+		})
+	}
+
+	if page.H1Count == 0 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeH1Missing, Category: model.CategorySEO,
+			Severity: model.SeverityError, SourceURL: page.URL,
+			Message: "No H1 tag found on page",
+		})
+	} else if page.H1Count > 1 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeH1Multiple, Category: model.CategorySEO,
+			Severity: model.SeverityError, SourceURL: page.URL,
+			Message: fmt.Sprintf("Multiple H1 tags found (%d)", page.H1Count),
+		})
+	}
+
+	if len(page.Headings) >= 2 {
+		prevLevel := page.Headings[0].Level
+		for i := 1; i < len(page.Headings); i++ {
+			currLevel := page.Headings[i].Level
+			if currLevel > prevLevel+1 {
+				results = append(results, model.RuleResult{
+					Code: model.CodeHeadingHierarchySkip, Category: model.CategorySEO,
+					Severity: model.SeverityWarning, SourceURL: page.URL,
+					Message: fmt.Sprintf("Heading level skipped: H%d → H%d", prevLevel, currLevel),
+				})
+				break
+			}
+			prevLevel = currLevel
+		}
+	}
+
+	if page.CanonicalURL == "" {
+		results = append(results, model.RuleResult{
+			Code: model.CodeCanonicalMissing, Category: model.CategorySEO,
+			Severity: model.SeverityInfo, SourceURL: page.URL,
+			Message: "Canonical URL is missing",
+		})
+	}
+
+	if page.HasNoindex {
+		results = append(results, model.RuleResult{
+			Code: model.CodeRobotsNoindex, Category: model.CategorySEO,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
+			Message: "Page has noindex directive",
+		})
+	}
+
+	for _, sd := range page.StructuredData {
+		if !sd.Valid {
+			results = append(results, model.RuleResult{
+				Code: model.CodeStructuredDataInvalid, Category: model.CategorySEO,
+				Severity: model.SeverityError, SourceURL: page.URL,
+				Message: fmt.Sprintf("Invalid JSON-LD structured data: %s", sd.Error),
+			})
+		}
+	}
+
+	if page.ImagesWithoutAlt > 0 {
+		results = append(results, model.RuleResult{
+			Code: model.CodeImageAltMissing, Category: model.CategoryImages,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
+			Message: fmt.Sprintf("%d image(s) missing alt text", page.ImagesWithoutAlt),
+		})
+	}
+
+	return results
 }
