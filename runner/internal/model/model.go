@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"io"
+	"sync"
+	"time"
+)
 
 // TargetType classifies what a URL points to.
 type TargetType string
@@ -234,4 +238,31 @@ type SEOAuditResult struct {
 	Findings    []Finding     `json:"findings"`
 	RuleResults []RuleResult  `json:"rule_results"`
 	Stats       RunStats      `json:"stats"`
+}
+
+// CrawlProgress is a single JSONL line in the progress file.
+type CrawlProgress struct {
+	Timestamp time.Time     `json:"timestamp"`
+	Event     string        `json:"event"` // "page", "finding", "complete"
+	Page      *SEOAuditPage `json:"page,omitempty"`
+	Finding   *Finding      `json:"finding,omitempty"`
+	Stats     *RunStats     `json:"stats,omitempty"`
+	RunID     string        `json:"run_id,omitempty"`
+	StartURL  string        `json:"start_url,omitempty"`
+}
+
+// SafeWriter provides thread-safe writes to an io.Writer.
+type SafeWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+// NewSafeWriter creates a new SafeWriter wrapping the given writer.
+func NewSafeWriter(w io.Writer) *SafeWriter { return &SafeWriter{w: w} }
+
+// Write writes a line atomically. Multiple goroutines can call Write concurrently.
+func (sw *SafeWriter) Write(data []byte) (int, error) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.w.Write(data)
 }

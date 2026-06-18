@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/four-flames/four-seo-check/runner/internal/config"
 	"github.com/four-flames/four-seo-check/runner/internal/crawl"
 	"github.com/four-flames/four-seo-check/runner/internal/logging"
+	"github.com/four-flames/four-seo-check/runner/internal/model"
 	"github.com/four-flames/four-seo-check/runner/internal/output"
 )
 
@@ -20,7 +24,6 @@ func main() {
 		os.Exit(2)
 	}
 	if cfg == nil {
-		// --help or no args
 		os.Exit(0)
 	}
 
@@ -29,10 +32,30 @@ func main() {
 		logger = logging.New(slog.LevelDebug, os.Stderr)
 	}
 
-	crawler := crawl.New(*cfg, logger)
+	// Open progress file for streaming output (all formats need it)
+	progressPath := strings.TrimSuffix(cfg.OutputFile, ".md") + ".progress.jsonl"
+	pf, err := os.Create(progressPath)
+	if err != nil {
+		logger.Error("cannot create progress file", "file", progressPath, "error", err)
+		os.Exit(2)
+	}
+	defer pf.Close()
+	progressWriter := model.NewSafeWriter(pf)
+	logger.Info("writing progress to", "file", progressPath)
 
-	// Calculate a reasonable timeout based on max pages and concurrency
-	timeoutPerPage := cfg.Timeout * 2 // fetch + validation
+	// Write run metadata as first line
+	startEvt := model.CrawlProgress{
+		Timestamp: time.Now().UTC(),
+		Event:     "complete", // reuse for metadata
+		RunID:     fmt.Sprintf("run-%d", time.Now().UnixNano()),
+		StartURL:  cfg.StartURL,
+	}
+	data, _ := json.Marshal(startEvt)
+	progressWriter.Write(append(data, '\n'))
+
+	crawler := crawl.New(*cfg, logger, progressWriter)
+
+	timeoutPerPage := cfg.Timeout * 2
 	overallTimeout := time.Duration(cfg.MaxPages/cfg.Concurrency+10) * timeoutPerPage
 	ctx, cancel := context.WithTimeout(context.Background(), overallTimeout)
 	defer cancel()
@@ -42,15 +65,18 @@ func main() {
 		"max_depth", cfg.MaxDepth,
 		"max_pages", cfg.MaxPages,
 		"concurrency", cfg.Concurrency,
+		"retries", cfg.RetryCount,
 	)
 
-	result, err := crawler.Run(ctx)
-	if err != nil {
+	if err := crawler.Run(ctx); err != nil {
 		logger.Error("crawl failed", "error", err)
 		os.Exit(2)
 	}
 
-	// Output
+	// Close progress file before reading it back
+	pf.Close()
+
+	// Determine output
 	var w io.Writer = os.Stdout
 	if cfg.OutputFile != "" {
 		f, err := os.Create(cfg.OutputFile)
@@ -62,32 +88,53 @@ func main() {
 		w = f
 	}
 
+	// Reopen progress file for reading
+	rpf, err := os.Open(progressPath)
+	if err != nil {
+		logger.Error("failed to read progress file", "file", progressPath, "error", err)
+		os.Exit(2)
+	}
+	defer rpf.Close()
+
+	audit, err := output.ReadProgressFile(rpf)
+	if err != nil {
+		logger.Error("failed to parse progress file", "error", err)
+		os.Exit(2)
+	}
+
 	switch cfg.Format {
 	case "json":
-		if err := output.WriteJSON(w, *result); err != nil {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(audit); err != nil {
 			logger.Error("failed to write JSON output", "error", err)
 			os.Exit(2)
 		}
 	case "csv":
-		if err := output.WriteCSV(w, *result); err != nil {
+		if err := output.WriteCSV(w, model.CrawlResult{
+			Findings: audit.Findings,
+			Stats:    audit.Stats,
+		}); err != nil {
 			logger.Error("failed to write CSV output", "error", err)
 			os.Exit(2)
 		}
 	case "md":
-		auditResult := crawler.AuditResult()
-		if err := output.WriteMarkdown(w, auditResult); err != nil {
+		if err := output.WriteMarkdown(w, *audit); err != nil {
 			logger.Error("failed to write Markdown output", "error", err)
 			os.Exit(2)
 		}
-	default:
-		if err := output.WriteTable(w, *result); err != nil {
+	default: // "table"
+		if err := output.WriteTable(w, model.CrawlResult{
+			Findings: audit.Findings,
+			Stats:    audit.Stats,
+		}); err != nil {
 			logger.Error("failed to write table output", "error", err)
 			os.Exit(2)
 		}
 	}
 
-	// Exit code: 1 if there are findings
-	if len(result.Findings) > 0 {
+	// Exit code based on findings
+	if len(audit.Findings) > 0 {
 		os.Exit(1)
 	}
 }

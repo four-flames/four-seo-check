@@ -2,6 +2,7 @@ package crawl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -15,8 +16,6 @@ import (
 	"github.com/four-flames/four-seo-check/runner/internal/httpx"
 	"github.com/four-flames/four-seo-check/runner/internal/model"
 	"github.com/four-flames/four-seo-check/runner/internal/normalize"
-	"github.com/four-flames/four-seo-check/runner/internal/report"
-	"github.com/four-flames/four-seo-check/runner/internal/rules"
 	"github.com/four-flames/four-seo-check/runner/internal/validate"
 	"golang.org/x/net/html"
 	"golang.org/x/time/rate"
@@ -28,6 +27,18 @@ type queueItem struct {
 	depth int
 }
 
+// crawlStats tracks crawl statistics with atomic counters.
+type crawlStats struct {
+	PagesCrawled   int64
+	LinksChecked   int64
+	ImagesChecked  int64
+	InternalBroken int64
+	ExternalBroken int64
+	Status4xx      int64
+	Status5xx      int64
+	Timeouts       int64
+}
+
 // Crawler is the core SEO crawler.
 type Crawler struct {
 	cfg    config.Config
@@ -36,44 +47,47 @@ type Crawler struct {
 	client    *httpx.Client
 	validator *validate.Validator
 
-	collector *report.Collector
-	runID     string
+	runID          string
+	progressWriter *model.SafeWriter
+
+	stats   *crawlStats
+	statsMu sync.Mutex
 
 	seen   map[string]bool
 	seenMu sync.Mutex
-
-	seoAuditPages []model.SEOAuditPage
-	seoMu         sync.Mutex
 }
 
 // New creates a new Crawler from configuration.
-func New(cfg config.Config, logger *slog.Logger) *Crawler {
+func New(cfg config.Config, logger *slog.Logger, progressWriter *model.SafeWriter) *Crawler {
 	httpClient := httpx.NewClient(httpx.ClientConfig{
-		UserAgent:      cfg.UserAgent,
-		RequestTimeout: cfg.Timeout,
-		MaxRetries:     2,
-		RetryDelay:     1 * time.Second,
-		MaxBodyBytes:   4096, // For image GET fallback
+		UserAgent:        cfg.UserAgent,
+		RequestTimeout:   cfg.Timeout,
+		MaxRetries:       cfg.RetryCount,
+		RetryDelay:       cfg.RetryDelay,
+		MaxBodyBytes:     4096, // For image GET fallback
+		RetryOnRateLimit: true,
+		RetryOnServerErr: true,
 	})
 
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 
 	return &Crawler{
-		cfg:       cfg,
-		logger:    logger,
-		client:    httpClient,
-		validator: validate.NewValidator(httpClient),
-		collector: report.NewCollector(runID, cfg.StartURL),
-		runID:     runID,
-		seen:      make(map[string]bool),
+		cfg:            cfg,
+		logger:         logger,
+		client:         httpClient,
+		validator:      validate.NewValidator(httpClient),
+		runID:          runID,
+		progressWriter: progressWriter,
+		stats:          &crawlStats{},
+		seen:           make(map[string]bool),
 	}
 }
 
-// Run executes the crawl and returns the result.
-func (c *Crawler) Run(ctx context.Context) (*model.CrawlResult, error) {
+// Run executes the crawl and returns nil on success.
+func (c *Crawler) Run(ctx context.Context) error {
 	startURL, err := url.Parse(c.cfg.StartURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid start URL: %w", err)
+		return fmt.Errorf("invalid start URL: %w", err)
 	}
 
 	host := startURL.Host
@@ -115,8 +129,28 @@ func (c *Crawler) Run(ctx context.Context) (*model.CrawlResult, error) {
 	close(queue)
 
 	c.client.CloseIdleConnections()
-	result := c.collector.Result()
-	return &result, nil
+
+	// Write completion event
+	stats := model.RunStats{
+		PagesCrawled:   int(atomic.LoadInt64(&c.stats.PagesCrawled)),
+		LinksChecked:   int(atomic.LoadInt64(&c.stats.LinksChecked)),
+		ImagesChecked:  int(atomic.LoadInt64(&c.stats.ImagesChecked)),
+		InternalBroken: int(atomic.LoadInt64(&c.stats.InternalBroken)),
+		ExternalBroken: int(atomic.LoadInt64(&c.stats.ExternalBroken)),
+		Status4xx:      int(atomic.LoadInt64(&c.stats.Status4xx)),
+		Status5xx:      int(atomic.LoadInt64(&c.stats.Status5xx)),
+		Timeouts:       int(atomic.LoadInt64(&c.stats.Timeouts)),
+	}
+
+	evt := model.CrawlProgress{
+		Timestamp: time.Now().UTC(),
+		Event:     "complete",
+		Stats:     &stats,
+	}
+	data, _ := json.Marshal(evt)
+	c.progressWriter.Write(append(data, '\n'))
+
+	return nil
 }
 
 func (c *Crawler) worker(
@@ -175,7 +209,6 @@ func (c *Crawler) worker(
 				continue
 			}
 
-			finalURL := resp.Request.URL.String()
 			contentType := resp.Header.Get("Content-Type")
 
 			// Check content type - only process HTML pages
@@ -212,20 +245,6 @@ func (c *Crawler) worker(
 			// Extract links
 			links := extract.Links(doc, baseURL)
 			images := extract.Images(doc, baseURL)
-
-			// Collect page info
-			page := model.Page{
-				URL:         item.url,
-				FinalURL:    finalURL,
-				StatusCode:  resp.StatusCode,
-				Depth:       item.depth,
-				ContentType: contentType,
-				Links:       refsToURLs(links),
-				Images:      refsToURLs(images),
-				Title:       extract.Title(doc),
-				MetaDesc:    extract.MetaDescription(doc),
-			}
-			c.collector.AddPage(page)
 
 			// Build SEO audit data for this page
 			seoPage := model.SEOAuditPage{
@@ -269,9 +288,17 @@ func (c *Crawler) worker(
 			// Noindex check
 			seoPage.HasNoindex = strings.Contains(strings.ToLower(seoPage.RobotsMeta), "noindex")
 
-			c.seoMu.Lock()
-			c.seoAuditPages = append(c.seoAuditPages, seoPage)
-			c.seoMu.Unlock()
+			// Write page to progress file immediately (no memory accumulation)
+			evt := model.CrawlProgress{
+				Timestamp: time.Now().UTC(),
+				Event:     "page",
+				Page:      &seoPage,
+			}
+			data, _ := json.Marshal(evt)
+			c.progressWriter.Write(append(data, '\n'))
+
+			// Increment page stats
+			atomic.AddInt64(&c.stats.PagesCrawled, 1)
 
 			// Validate links
 			for _, ref := range links {
@@ -283,7 +310,26 @@ func (c *Crawler) worker(
 					if c.cfg.CheckExternal {
 						finding := c.validator.ValidateLink(ctx, ref, c.runID)
 						if finding != nil {
-							c.collector.AddFinding(*finding)
+							// Write finding to progress file immediately
+							evt := model.CrawlProgress{
+								Timestamp: time.Now().UTC(),
+								Event:     "finding",
+								Finding:   finding,
+							}
+							data, _ := json.Marshal(evt)
+							c.progressWriter.Write(append(data, '\n'))
+
+							// Update stats
+							atomic.AddInt64(&c.stats.LinksChecked, 1)
+							atomic.AddInt64(&c.stats.ExternalBroken, 1)
+							if finding.ErrorClass == model.Error4xx {
+								atomic.AddInt64(&c.stats.Status4xx, 1)
+							} else if finding.ErrorClass == model.Error5xx {
+								atomic.AddInt64(&c.stats.Status5xx, 1)
+							} else if finding.ErrorClass == model.ErrorTimeout {
+								atomic.AddInt64(&c.stats.Timeouts, 1)
+							}
+
 							c.logger.Warn("broken link found",
 								"source", ref.SourceURL,
 								"target", finding.TargetURL,
@@ -298,7 +344,26 @@ func (c *Crawler) worker(
 				// Internal link: validate
 				finding := c.validator.ValidateLink(ctx, ref, c.runID)
 				if finding != nil {
-					c.collector.AddFinding(*finding)
+					// Write finding to progress file immediately
+					evt := model.CrawlProgress{
+						Timestamp: time.Now().UTC(),
+						Event:     "finding",
+						Finding:   finding,
+					}
+					data, _ := json.Marshal(evt)
+					c.progressWriter.Write(append(data, '\n'))
+
+					// Update stats
+					atomic.AddInt64(&c.stats.LinksChecked, 1)
+					atomic.AddInt64(&c.stats.InternalBroken, 1)
+					if finding.ErrorClass == model.Error4xx {
+						atomic.AddInt64(&c.stats.Status4xx, 1)
+					} else if finding.ErrorClass == model.Error5xx {
+						atomic.AddInt64(&c.stats.Status5xx, 1)
+					} else if finding.ErrorClass == model.ErrorTimeout {
+						atomic.AddInt64(&c.stats.Timeouts, 1)
+					}
+
 					c.logger.Warn("broken link found",
 						"source", ref.SourceURL,
 						"target", finding.TargetURL,
@@ -333,7 +398,25 @@ func (c *Crawler) worker(
 
 				finding := c.validator.ValidateImage(ctx, ref, c.runID)
 				if finding != nil {
-					c.collector.AddFinding(*finding)
+					// Write finding to progress file immediately
+					evt := model.CrawlProgress{
+						Timestamp: time.Now().UTC(),
+						Event:     "finding",
+						Finding:   finding,
+					}
+					data, _ := json.Marshal(evt)
+					c.progressWriter.Write(append(data, '\n'))
+
+					// Update stats
+					atomic.AddInt64(&c.stats.ImagesChecked, 1)
+					if finding.ErrorClass == model.Error4xx {
+						atomic.AddInt64(&c.stats.Status4xx, 1)
+					} else if finding.ErrorClass == model.Error5xx {
+						atomic.AddInt64(&c.stats.Status5xx, 1)
+					} else if finding.ErrorClass == model.ErrorTimeout {
+						atomic.AddInt64(&c.stats.Timeouts, 1)
+					}
+
 					c.logger.Warn("broken image found",
 						"source", ref.SourceURL,
 						"target", finding.TargetURL,
@@ -392,144 +475,4 @@ func countImagesWithoutAlt(refs []model.DiscoveredReference) int {
 		}
 	}
 	return count
-}
-
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
-// AuditResult builds the full SEO audit result after crawling completes.
-func (c *Crawler) AuditResult() model.SEOAuditResult {
-	result := c.collector.Result()
-	_ = rules.NewEngine()
-
-	audit := model.SEOAuditResult{
-		RunID:      result.RunID,
-		StartURL:   result.StartURL,
-		StartedAt:  result.StartedAt,
-		FinishedAt: result.FinishedAt,
-		Pages:      c.seoAuditPages,
-		Findings:   result.Findings,
-		Stats:      result.Stats,
-	}
-
-	// Run rules against each SEO audit page
-	for _, page := range c.seoAuditPages {
-		// Title checks
-		if page.Title == "" {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeTitleMissing, Category: model.CategorySEO,
-				Severity: model.SeverityError, SourceURL: page.URL,
-				Message: "Title tag is missing",
-			})
-		} else if len(page.Title) < 30 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeTitleTooShort, Category: model.CategorySEO,
-				Severity: model.SeverityWarning, SourceURL: page.URL,
-				Message: fmt.Sprintf("Title too short (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
-			})
-		} else if len(page.Title) > 60 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeTitleTooLong, Category: model.CategorySEO,
-				Severity: model.SeverityWarning, SourceURL: page.URL,
-				Message: fmt.Sprintf("Title too long (%d chars): %s", len(page.Title), truncateStr(page.Title, 60)),
-			})
-		}
-
-		// Meta description checks
-		if page.MetaDescription == "" {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeMetaDescMissing, Category: model.CategorySEO,
-				Severity: model.SeverityWarning, SourceURL: page.URL,
-				Message: "Meta description is missing",
-			})
-		} else if len(page.MetaDescription) < 70 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeMetaDescTooShort, Category: model.CategorySEO,
-				Severity: model.SeverityInfo, SourceURL: page.URL,
-				Message: fmt.Sprintf("Meta description too short (%d chars)", len(page.MetaDescription)),
-			})
-		} else if len(page.MetaDescription) > 160 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeMetaDescTooLong, Category: model.CategorySEO,
-				Severity: model.SeverityInfo, SourceURL: page.URL,
-				Message: fmt.Sprintf("Meta description too long (%d chars)", len(page.MetaDescription)),
-			})
-		}
-
-		// H1 checks
-		if page.H1Count == 0 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeH1Missing, Category: model.CategorySEO,
-				Severity: model.SeverityError, SourceURL: page.URL,
-				Message: "No H1 tag found on page",
-			})
-		} else if page.H1Count > 1 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeH1Multiple, Category: model.CategorySEO,
-				Severity: model.SeverityError, SourceURL: page.URL,
-				Message: fmt.Sprintf("Multiple H1 tags found (%d)", page.H1Count),
-			})
-		}
-
-		// Heading hierarchy check
-		if len(page.Headings) >= 2 {
-			prevLevel := page.Headings[0].Level
-			for i := 1; i < len(page.Headings); i++ {
-				currLevel := page.Headings[i].Level
-				if currLevel > prevLevel+1 {
-					audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-						Code: model.CodeHeadingHierarchySkip, Category: model.CategorySEO,
-						Severity: model.SeverityWarning, SourceURL: page.URL,
-						Message: fmt.Sprintf("Heading level skipped: H%d → H%d", prevLevel, currLevel),
-					})
-					break
-				}
-				prevLevel = currLevel
-			}
-		}
-
-		// Canonical check
-		if page.CanonicalURL == "" {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeCanonicalMissing, Category: model.CategorySEO,
-				Severity: model.SeverityInfo, SourceURL: page.URL,
-				Message: "Canonical URL is missing",
-			})
-		}
-
-		// Robots noindex
-		if page.HasNoindex {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeRobotsNoindex, Category: model.CategorySEO,
-				Severity: model.SeverityWarning, SourceURL: page.URL,
-				Message: "Page has noindex directive",
-			})
-		}
-
-		// Structured data validation
-		for _, sd := range page.StructuredData {
-			if !sd.Valid {
-				audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-					Code: model.CodeStructuredDataInvalid, Category: model.CategorySEO,
-					Severity: model.SeverityError, SourceURL: page.URL,
-					Message: fmt.Sprintf("Invalid JSON-LD structured data: %s", sd.Error),
-				})
-			}
-		}
-
-		// Image alt text
-		if page.ImagesWithoutAlt > 0 {
-			audit.RuleResults = append(audit.RuleResults, model.RuleResult{
-				Code: model.CodeImageAltMissing, Category: model.CategoryImages,
-				Severity: model.SeverityWarning, SourceURL: page.URL,
-				Message: fmt.Sprintf("%d image(s) missing alt text", page.ImagesWithoutAlt),
-			})
-		}
-	}
-
-	return audit
 }

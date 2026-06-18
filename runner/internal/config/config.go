@@ -20,6 +20,8 @@ type Config struct {
 	OutputFile    string
 	UserAgent     string
 	Timeout       time.Duration
+	RetryCount    int
+	RetryDelay    time.Duration
 	RespectRobots bool
 	Verbose       bool
 }
@@ -87,6 +89,8 @@ func parseCrawl() (*Config, error) {
 	fs.StringVar(&cfg.OutputFile, "output", "", "Output file path (stdout if empty)")
 	fs.StringVar(&cfg.UserAgent, "user-agent", "RedFlameSEO/0.1", "User-Agent header value")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "Request timeout per URL (e.g. 10s, 30s)")
+	fs.IntVar(&cfg.RetryCount, "retry", 2, "Number of retries for transport errors and 429/503")
+	fs.DurationVar(&cfg.RetryDelay, "retry-delay", 1*time.Second, "Base delay between retries (exponential backoff)")
 	fs.BoolVar(&cfg.RespectRobots, "respect-robots", false, "Respect robots.txt (not yet implemented)")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable debug logging")
 
