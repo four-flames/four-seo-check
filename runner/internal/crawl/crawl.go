@@ -300,7 +300,42 @@ func (c *Crawler) worker(
 			// Increment page stats
 			atomic.AddInt64(&c.stats.PagesCrawled, 1)
 
-			// Validate links
+			// Validate images FIRST
+			for _, ref := range images {
+				ref.Depth = item.depth
+				ref.SourceURL = item.url
+
+				finding := c.validator.ValidateImage(ctx, ref, c.runID)
+				if finding != nil {
+					// Write finding to progress file immediately
+					evt := model.CrawlProgress{
+						Timestamp: time.Now().UTC(),
+						Event:     "finding",
+						Finding:   finding,
+					}
+					data, _ := json.Marshal(evt)
+					c.progressWriter.Write(append(data, '\n'))
+
+					// Update stats
+					atomic.AddInt64(&c.stats.ImagesChecked, 1)
+					if finding.ErrorClass == model.Error4xx {
+						atomic.AddInt64(&c.stats.Status4xx, 1)
+					} else if finding.ErrorClass == model.Error5xx {
+						atomic.AddInt64(&c.stats.Status5xx, 1)
+					} else if finding.ErrorClass == model.ErrorTimeout {
+						atomic.AddInt64(&c.stats.Timeouts, 1)
+					}
+
+					c.logger.Warn("broken image found",
+						"source", ref.SourceURL,
+						"target", finding.TargetURL,
+						"status", finding.StatusCode,
+						"error", finding.ErrorClass,
+					)
+				}
+			}
+
+			// Validate links SECOND
 			for _, ref := range links {
 				ref.Depth = item.depth
 				ref.SourceURL = item.url
@@ -388,41 +423,6 @@ func (c *Crawler) worker(
 					case <-ctx.Done():
 						return
 					}
-				}
-			}
-
-			// Validate images
-			for _, ref := range images {
-				ref.Depth = item.depth
-				ref.SourceURL = item.url
-
-				finding := c.validator.ValidateImage(ctx, ref, c.runID)
-				if finding != nil {
-					// Write finding to progress file immediately
-					evt := model.CrawlProgress{
-						Timestamp: time.Now().UTC(),
-						Event:     "finding",
-						Finding:   finding,
-					}
-					data, _ := json.Marshal(evt)
-					c.progressWriter.Write(append(data, '\n'))
-
-					// Update stats
-					atomic.AddInt64(&c.stats.ImagesChecked, 1)
-					if finding.ErrorClass == model.Error4xx {
-						atomic.AddInt64(&c.stats.Status4xx, 1)
-					} else if finding.ErrorClass == model.Error5xx {
-						atomic.AddInt64(&c.stats.Status5xx, 1)
-					} else if finding.ErrorClass == model.ErrorTimeout {
-						atomic.AddInt64(&c.stats.Timeouts, 1)
-					}
-
-					c.logger.Warn("broken image found",
-						"source", ref.SourceURL,
-						"target", finding.TargetURL,
-						"status", finding.StatusCode,
-						"error", finding.ErrorClass,
-					)
 				}
 			}
 

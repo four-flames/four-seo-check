@@ -8,7 +8,7 @@ Closes #
 
 ## Checklist
 
-- [ ] Code follows project conventions (see CLAUDE.md)
+- [ ] Code follows project conventions (see AGENTS.md)
 - [ ] Tests added/updated and passing (`go test ./...`)
 - [ ] No new lint warnings (`go vet ./...`)
 - [ ] HISTORY.md updated with changes

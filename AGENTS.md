@@ -1,4 +1,4 @@
-# CLAUDE.md — four-seo-check
+# AGENTS.md — four-seo-check
 
 ## What is four-seo-check?
 

@@ -5,7 +5,7 @@
 ### Added
 - Initial project structure: runner/, api/, frontend/
 - Go module initialization for runner/ (Go 1.24)
-- Project documentation: README.md, CLAUDE.md, ROADMAP.md, .editorconfig
+- Project documentation: README.md, AGENTS.md, ROADMAP.md, .editorconfig
 - GitHub templates: PR template, issue templates, Dependabot config
 - Monorepo structure: packages/api-contract/, devops/, scripts/
 - Makefile with build, test, lint, fmt, crawl targets
