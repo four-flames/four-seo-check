@@ -1,0 +1,51 @@
+# Binaries
+runner/seoctl
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Reports
+*.csv
+*.json
+!sample*.csv
+!sample*.json
+!*.sample.*
+
+# PHP
+/api/vendor/
+/api/var/
+/api/.phpunit.result.cache
+
+# Node
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.nuxt/
