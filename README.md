@@ -16,7 +16,7 @@ four-seo-check/
 
 ```bash
 cd runner
-go build -o septl ./cmd/seoctl
+go build -o seoctl ./cmd/seoctl
 
 # Crawl a site for broken links and images
 ./seoctl crawl https://example.com

@@ -17,7 +17,7 @@ help:
 
 # Build
 build:
-	cd runner && go build -o septl ./cmd/seoctl
+	cd runner && go build -o seoctl ./cmd/seoctl
 
 # Test
 test:

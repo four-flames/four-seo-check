@@ -8,7 +8,7 @@ A technical SEO crawler and audit tool built in Go. Phase 1 finds broken links a
 
 | Task                    | Command                                                  |
 |-------------------------|----------------------------------------------------------|
-| Build                   | `cd runner && go build -o septl ./cmd/seoctl`           |
+| Build                   | `cd runner && go build -o seoctl ./cmd/seoctl`           |
 | Test (all)              | `cd runner && go test ./...`                             |
 | Test (single pkg)       | `cd runner && go test ./internal/normalize/`             |
 | Test (verbose)          | `cd runner && go test -v ./...`                          |
