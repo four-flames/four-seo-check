@@ -179,8 +179,8 @@ func WriteMarkdown(w io.Writer, audit model.SEOAuditResult) error {
 		for i, f := range audit.Findings {
 			fmt.Fprintf(&b, "| %d | %s | %s | %s | %d | %s |\n",
 				i+1,
-				escapeMD(truncateStr(f.SourceURL, 45)),
-				escapeMD(truncateStr(f.TargetURL, 45)),
+				escapeMD(f.SourceURL),
+				escapeMD(f.TargetURL),
 				f.TargetType, f.StatusCode, f.ErrorClass)
 		}
 		b.WriteString("\n")
@@ -215,7 +215,7 @@ func WriteMarkdown(w io.Writer, audit model.SEOAuditResult) error {
 			}
 			fmt.Fprintf(&b, "| %s | %s | %s |\n",
 				sev,
-				escapeMD(truncateStr(rr.SourceURL, 40)),
+				escapeMD(rr.SourceURL),
 				rr.Message)
 		}
 		b.WriteString("\n")
