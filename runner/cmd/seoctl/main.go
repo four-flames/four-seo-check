@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,6 +31,14 @@ func main() {
 	logger := logging.Default()
 	if cfg.Verbose {
 		logger = logging.New(slog.LevelDebug, os.Stderr)
+	}
+
+	// Ensure output directory exists (e.g., results/)
+	if cfg.OutputFile != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.OutputFile), 0755); err != nil {
+			logger.Error("failed to create output directory", "dir", filepath.Dir(cfg.OutputFile), "error", err)
+			os.Exit(2)
+		}
 	}
 
 	// Open progress file for streaming output (all formats need it)

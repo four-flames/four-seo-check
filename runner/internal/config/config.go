@@ -127,9 +127,14 @@ func parseCrawl() (*Config, error) {
 	}
 	cfg.StartURL = urlArg
 
-	// Default output file: seo-audit-YYYY-MM-DD-HHmmss.md
+	// Default output file: results/{normalized-host}-YYYY-MM-DD-HHmmss.md
 	if cfg.OutputFile == "" && cfg.Format == "md" {
-		cfg.OutputFile = "seo-audit-" + time.Now().Format("2006-01-02-150405") + ".md"
+		ts := time.Now().Format("2006-01-02-150405")
+		host := "seo-audit"
+		if normalized, err := normalizeURL(cfg.StartURL); err == nil && normalized != "" {
+			host = normalized
+		}
+		cfg.OutputFile = "results/" + host + "-" + ts + ".md"
 	}
 
 	// Validate
@@ -166,4 +171,24 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// normalizeURL extracts a filesystem-safe hostname from a URL.
+// Returns "example-com" for "https://www.example.com/page".
+func normalizeURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid URL")
+	}
+	host := strings.ToLower(u.Host)
+	host = strings.TrimPrefix(host, "www.")
+	// Strip port
+	if i := strings.Index(host, ":"); i != -1 {
+		host = host[:i]
+	}
+	host = strings.ReplaceAll(host, ".", "-")
+	if host == "" {
+		return "", fmt.Errorf("empty host")
+	}
+	return host, nil
 }
