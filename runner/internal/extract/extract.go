@@ -119,6 +119,34 @@ func Images(doc *html.Node, baseURL *url.URL) []model.DiscoveredReference {
 	return refs
 }
 
+// ImageClassMap extracts the CSS class attribute from all <img> elements.
+// Returns a map from normalized image URL to its class string.
+func ImageClassMap(doc *html.Node, baseURL *url.URL) map[string]string {
+	result := make(map[string]string)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "img" {
+			src := getAttr(n, "src")
+			if src == "" {
+				goto next
+			}
+			trimmed := strings.TrimSpace(src)
+			resolved, err := resolveURL(baseURL, trimmed)
+			if err != nil || resolved == "" {
+				goto next
+			}
+			cls := strings.TrimSpace(getAttr(n, "class"))
+			result[resolved] = cls
+		}
+	next:
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return result
+}
+
 // Title extracts the <title> text from an HTML document.
 func Title(doc *html.Node) string {
 	var title string

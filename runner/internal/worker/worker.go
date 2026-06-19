@@ -177,6 +177,23 @@ func (w *Worker) Process(ctx context.Context, pageURL string, depth int, runID s
 		}
 	}
 
+	// Image placeholder detection: check img classes against known placeholder patterns
+	imageClasses := extract.ImageClassMap(doc, baseURL)
+	var placeholderImages []string
+	for _, img := range images {
+		cls := imageClasses[img.TargetURL]
+		if cls != "" {
+			parts := strings.Fields(strings.ToLower(cls))
+			for _, p := range parts {
+				if p == "product-image-placeholder" {
+					placeholderImages = append(placeholderImages, img.TargetURL)
+					break
+				}
+			}
+		}
+	}
+	seoPage.PlaceholderImages = placeholderImages
+
 	// Set depth and source on references
 	for i := range links {
 		links[i].Depth = depth
