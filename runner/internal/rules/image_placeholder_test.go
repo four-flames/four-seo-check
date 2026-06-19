@@ -38,8 +38,8 @@ func TestImagePlaceholderDetected(t *testing.T) {
 	if result.Code != model.CodeImagePlaceholder {
 		t.Errorf("Code = %v, want %v", result.Code, model.CodeImagePlaceholder)
 	}
-	if result.Severity != model.SeverityWarning {
-		t.Errorf("Severity = %v, want %v", result.Severity, model.SeverityWarning)
+	if result.Severity != model.SeverityError {
+		t.Errorf("Severity = %v, want %v", result.Severity, model.SeverityError)
 	}
 	if result.Category != model.CategoryImages {
 		t.Errorf("Category = %v, want %v", result.Category, model.CategoryImages)

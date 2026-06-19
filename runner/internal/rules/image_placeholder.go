@@ -37,7 +37,7 @@ func (r *ImagePlaceholderRule) EvaluatePage(page model.SEOAuditPage) *model.Rule
 	return &model.RuleResult{
 		Code:      model.CodeImagePlaceholder,
 		Category:  model.CategoryImages,
-		Severity:  model.SeverityWarning,
+		Severity:  model.SeverityError,
 		SourceURL: page.URL,
 		Message:   fmt.Sprintf("%d image(s) with placeholder CSS class (%s)", len(page.PlaceholderImages), strings.Join(r.Classes, ", ")),
 	}

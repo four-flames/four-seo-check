@@ -148,7 +148,13 @@ func WriteMarkdown(w io.Writer, audit model.SEOAuditResult) error {
 		case model.SeverityInfo: infos++
 		}
 	}
-	score := 100 - errors*5 - warnings*2 - infos
+	// Normalize by page count — large sites aren't unfairly penalized.
+	// Info items are purely informational — they don't affect the score.
+	pages := audit.Stats.PagesCrawled
+	if pages < 1 { pages = 1 }
+	normalizer := pages / 20
+	if normalizer < 1 { normalizer = 1 }
+	score := 100 - (errors*5 + warnings) / normalizer
 	if score < 0 { score = 0 }
 
 	b.WriteString("## 📊 Scorecard\n\n")
@@ -426,7 +432,7 @@ func evaluatePageRules(page model.SEOAuditPage) []model.RuleResult {
 	if page.H1Count == 0 {
 		results = append(results, model.RuleResult{
 			Code: model.CodeH1Missing, Category: model.CategorySEO,
-			Severity: model.SeverityError, SourceURL: page.URL,
+			Severity: model.SeverityWarning, SourceURL: page.URL,
 			Message: "No H1 tag found on page",
 		})
 	} else if page.H1Count > 1 {
