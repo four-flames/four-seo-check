@@ -69,6 +69,7 @@ const (
 	CodeCanonicalMissing      IssueCode = "canonical.missing"
 	CodeRobotsNoindex         IssueCode = "robots.noindex.detected"
 	CodeStructuredDataInvalid IssueCode = "structured_data.jsonld.invalid"
+	CodeProductImageTooSmall  IssueCode = "product.image.too_small"
 )
 
 // RedirectHop records one step in a redirect chain.
@@ -203,6 +204,13 @@ type OpenGraph struct {
 	SiteName    string `json:"site_name,omitempty"`
 }
 
+// SrcSetEntry holds one srcset candidate with its parsed descriptors.
+type SrcSetEntry struct {
+	URL     string  `json:"url"`
+	Width   int     `json:"width,omitempty"`   // from "800w" descriptor
+	Density float64 `json:"density,omitempty"` // from "2x" descriptor
+}
+
 // SEOAuditPage holds all on-page SEO data for one crawled page.
 type SEOAuditPage struct {
 	URL                string               `json:"url"`
@@ -226,6 +234,9 @@ type SEOAuditPage struct {
 	WordCount          int                  `json:"word_count"`
 	InternalLinksCount int                  `json:"internal_links_count"`
 	ExternalLinksCount int                  `json:"external_links_count"`
+	IsProductPage     bool          `json:"is_product_page"`
+	MainImageSrcSet   []SrcSetEntry `json:"main_image_srcset,omitempty"`
+	MainImageMaxWidth int           `json:"main_image_max_width,omitempty"`
 }
 
 // SEOAuditResult is the top-level audit report.

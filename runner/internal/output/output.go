@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/four-flames/four-seo-check/runner/internal/model"
+	"github.com/four-flames/four-seo-check/runner/internal/rules"
 )
 
 // WriteTable writes findings and stats as a formatted text table.
@@ -484,6 +485,11 @@ func evaluatePageRules(page model.SEOAuditPage) []model.RuleResult {
 			Severity: model.SeverityWarning, SourceURL: page.URL,
 			Message: fmt.Sprintf("%d image(s) missing alt text", page.ImagesWithoutAlt),
 		})
+	}
+
+	productImageRule := rules.NewProductImageSizeRule()
+	if result := productImageRule.EvaluatePage(page); result != nil {
+		results = append(results, *result)
 	}
 
 	return results

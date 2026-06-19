@@ -3,6 +3,7 @@ package extract
 import (
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/four-flames/four-seo-check/runner/internal/model"
@@ -430,6 +431,53 @@ func SrcSetURLs(doc *html.Node, baseURL *url.URL) []string {
 	}
 	walk(doc)
 	return urls
+}
+
+// SrcSetDescriptors parses srcset attributes on <img> and <source> elements,
+// returning structured entries with width and density descriptors.
+// Format: "url1 400w, url2 2x" or "url1 400w, url2 800w"
+func SrcSetDescriptors(doc *html.Node, baseURL *url.URL) []model.SrcSetEntry {
+	var entries []model.SrcSetEntry
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && (n.Data == "img" || n.Data == "source") {
+			srcset := getAttr(n, "srcset")
+			if srcset == "" {
+				goto next
+			}
+			parts := strings.Split(srcset, ",")
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				fields := strings.Fields(part)
+				if len(fields) == 0 {
+					continue
+				}
+				resolved, err := resolveURL(baseURL, fields[0])
+				if err != nil || resolved == "" {
+					continue
+				}
+				entry := model.SrcSetEntry{URL: resolved}
+				for _, f := range fields[1:] {
+					if strings.HasSuffix(f, "w") {
+						if w, err := strconv.Atoi(strings.TrimSuffix(f, "w")); err == nil {
+							entry.Width = w
+						}
+					} else if strings.HasSuffix(f, "x") {
+						if d, err := strconv.ParseFloat(strings.TrimSuffix(f, "x"), 64); err == nil {
+							entry.Density = d
+						}
+					}
+				}
+				entries = append(entries, entry)
+			}
+		}
+	next:
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return entries
 }
 
 // WordCount estimates word count from visible text.

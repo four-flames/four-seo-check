@@ -137,6 +137,46 @@ func (w *Worker) Process(ctx context.Context, pageURL string, depth int, runID s
 	seoPage.InternalLinksCount = countInternalLinks(links, host)
 	seoPage.ExternalLinksCount = countExternalLinks(links, host)
 
+	// PDP detection: og:type == "product" OR structured data @type == "Product"
+	seoPage.IsProductPage = strings.EqualFold(og.Type, "product")
+	if !seoPage.IsProductPage {
+		for _, sd := range structuredData {
+			if strings.Contains(strings.ToLower(sd.Type), "product") {
+				seoPage.IsProductPage = true
+				break
+			}
+		}
+	}
+
+	// Main image srcset: use og:image or first img with largest srcset
+	if seoPage.IsProductPage {
+		mainImgSelector := og.Image
+		allSrcSets := extract.SrcSetDescriptors(doc, baseURL)
+
+		// Try to find srcset matching og:image
+		var mainSrcSet []model.SrcSetEntry
+		if mainImgSelector != "" {
+			normalOGImg, _ := normalize.Normalize(mainImgSelector)
+			for _, entry := range allSrcSets {
+				normEntry, _ := normalize.Normalize(entry.URL)
+				if normEntry == normalOGImg {
+					mainSrcSet = append(mainSrcSet, entry)
+				}
+			}
+		}
+		// Fallback: use all srcset entries from first img
+		if len(mainSrcSet) == 0 {
+			mainSrcSet = allSrcSets
+		}
+
+		seoPage.MainImageSrcSet = mainSrcSet
+		for _, entry := range mainSrcSet {
+			if entry.Width > seoPage.MainImageMaxWidth {
+				seoPage.MainImageMaxWidth = entry.Width
+			}
+		}
+	}
+
 	// Set depth and source on references
 	for i := range links {
 		links[i].Depth = depth

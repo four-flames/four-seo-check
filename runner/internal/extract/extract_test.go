@@ -147,3 +147,45 @@ func TestExtractImagesEmpty(t *testing.T) {
 		t.Errorf("expected 0 images, got %d", len(refs))
 	}
 }
+
+func TestSrcSetDescriptors(t *testing.T) {
+	htmlContent := `<html><body>
+<img srcset="img-400.jpg 400w, img-800.jpg 800w, img-1200.jpg 1200w" src="img-400.jpg">
+<img srcset="icon-1x.png 1x, icon-2x.png 2x">
+<img srcset="">
+<img src="no-srcset.jpg">
+</body></html>`
+
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL, _ := url.Parse("https://example.com/")
+
+	entries := SrcSetDescriptors(doc, baseURL)
+
+	// Should have 5 entries (3 from first img + 2 from second)
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries, got %d", len(entries))
+	}
+
+	// Check first image widths
+	widths := []int{400, 800, 1200}
+	for i, w := range widths {
+		if entries[i].Width != w {
+			t.Errorf("entry[%d].Width = %d, want %d", i, entries[i].Width, w)
+		}
+	}
+
+	// Check second image densities
+	densities := []float64{1.0, 2.0}
+	for i, d := range densities {
+		idx := 3 + i // entries 3 and 4
+		if entries[idx].Density != d {
+			t.Errorf("entry[%d].Density = %f, want %f", idx, entries[idx].Density, d)
+		}
+		if entries[idx].Width != 0 {
+			t.Errorf("entry[%d].Width should be 0 for density descriptor, got %d", idx, entries[idx].Width)
+		}
+	}
+}
