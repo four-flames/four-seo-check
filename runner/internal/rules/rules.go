@@ -40,6 +40,7 @@ func NewEngine() *Engine {
 	e.Register(&CanonicalMissingRule{})
 	e.Register(&RobotsNoindexRule{})
 	e.Register(&StructuredDataInvalidRule{})
+	e.Register(NewProductImageSizeRule())
 	return e
 }
 
