@@ -126,11 +126,11 @@ func (c *Crawler) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
+	// Close queue now — buffered items still readable
+	close(queue)
+
 	// Wait for all workers to finish
 	wg.Wait()
-
-	// Safe to close now — all workers have exited
-	close(queue)
 
 	c.client.CloseIdleConnections()
 
@@ -444,12 +444,9 @@ func (c *Crawler) worker(
 				// Check same host
 				sourceURL, _ := url.Parse(item.url)
 				if sourceURL != nil && targetURL.Host == sourceURL.Host {
-					select {
-					case send <- queueItem{url: ref.TargetURL, depth: item.depth + 1}:
-					default:
-						// Queue full — URL will be discovered via another path
-					case <-ctx.Done():
-						return
+					// Non-blocking send (safe if channel already closed)
+					if !safeSend(send, queueItem{url: ref.TargetURL, depth: item.depth + 1}) {
+						// Queue full or channel closed — URL will be discovered via another path
 					}
 				}
 			}
@@ -503,4 +500,20 @@ func countImagesWithoutAlt(refs []model.DiscoveredReference) int {
 		}
 	}
 	return count
+}
+
+// safeSend attempts to send to the channel. Returns true if sent.
+// Recovers from panic if the channel is already closed.
+func safeSend(ch chan<- queueItem, item queueItem) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	select {
+	case ch <- item:
+		return true
+	default:
+		return false
+	}
 }
