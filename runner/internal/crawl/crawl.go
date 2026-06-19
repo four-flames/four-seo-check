@@ -109,28 +109,40 @@ func (c *Crawler) Run(ctx context.Context) error {
 	ctx, cancelFn := context.WithCancel(ctx)
 	defer cancelFn()
 
-	// Worker pool
+	// Worker pool wait group
 	var wg sync.WaitGroup
 
+	// Work tracking: counts in-flight items (queued + being processed)
+	var workWg sync.WaitGroup
+	done := make(chan struct{})
+
+	// Start workers
 	for i := 0; i < c.cfg.Concurrency; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			c.worker(ctx, workerID, limiter, queue, queue, host, &pageCount, cancelFn)
+			c.worker(ctx, workerID, limiter, queue, queue, host, &pageCount, cancelFn, done, &workWg)
 		}(i)
 	}
 
 	// Enqueue the start URL
+	workWg.Add(1)
 	select {
 	case queue <- queueItem{url: c.cfg.StartURL, depth: 0}:
 	case <-ctx.Done():
 	}
 
-	// Close queue now — buffered items still readable
-	close(queue)
+	// Supervisor: close done when no more work is in-flight
+	go func() {
+		workWg.Wait()
+		close(done)
+	}()
 
-	// Wait for all workers to finish
+	// Wait for all workers to finish processing
 	wg.Wait()
+
+	// Safe to close now — all workers have exited
+	close(queue)
 
 	c.client.CloseIdleConnections()
 
@@ -166,10 +178,14 @@ func (c *Crawler) worker(
 	host string,
 	pageCount *atomic.Int64,
 	cancelFn context.CancelFunc,
+	done <-chan struct{},
+	workWg *sync.WaitGroup,
 ) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-done:
 			return
 		case item, ok := <-recv:
 			if !ok {
@@ -444,9 +460,14 @@ func (c *Crawler) worker(
 				// Check same host
 				sourceURL, _ := url.Parse(item.url)
 				if sourceURL != nil && targetURL.Host == sourceURL.Host {
-					// Non-blocking send (safe if channel already closed)
-					if !safeSend(send, queueItem{url: ref.TargetURL, depth: item.depth + 1}) {
-						// Queue full or channel closed — URL will be discovered via another path
+					workWg.Add(1)
+					select {
+					case send <- queueItem{url: ref.TargetURL, depth: item.depth + 1}:
+					default:
+						workWg.Done() // send failed, undo
+					case <-ctx.Done():
+						workWg.Done() // cancelled, undo
+						return
 					}
 				}
 			}
@@ -458,6 +479,9 @@ func (c *Crawler) worker(
 				"links", len(links),
 				"images", len(images),
 			)
+
+			// Mark this work item as done
+			workWg.Done()
 		}
 	}
 }
@@ -502,18 +526,3 @@ func countImagesWithoutAlt(refs []model.DiscoveredReference) int {
 	return count
 }
 
-// safeSend attempts to send to the channel. Returns true if sent.
-// Recovers from panic if the channel is already closed.
-func safeSend(ch chan<- queueItem, item queueItem) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case ch <- item:
-		return true
-	default:
-		return false
-	}
-}
