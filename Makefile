@@ -17,7 +17,7 @@ help:
 
 # Build
 build:
-	cd runner && go build -o seoctl ./cmd/seoctl
+	cd runner && go build -o ../seoctl ./cmd/seoctl
 
 # Test
 test:
@@ -40,15 +40,16 @@ fmt:
 
 # Clean
 clean:
-	rm -f runner/seoctl
-	rm -f runner/coverage.out runner/coverage.html
+	cd runner && go clean
+	rm -f seoctl
+	rm -rf results/
 
 # Quick crawl examples
-crawl: build
-	./runner/seoctl crawl https://example.com --max-depth 1 --max-pages 5
+crawl:
+	./seoctl crawl https://example.com
 
-crawl-json: build
-	./runner/seoctl crawl https://example.com --max-depth 1 --max-pages 5 --format json
+crawl-json:
+	./seoctl crawl https://example.com --format json
 
-crawl-csv: build
-	./runner/seoctl crawl https://example.com --max-depth 1 --max-pages 5 --format csv --output report.csv
+crawl-csv:
+	./seoctl crawl https://example.com --format csv

@@ -1,5 +1,6 @@
 # Binaries
 runner/seoctl
+/seoctl
 *.exe
 *.dll
 *.so
@@ -50,3 +51,4 @@ Thumbs.db
 /frontend/dist/
 /frontend/.nuxt/
 seo-audit-*
+/results/
