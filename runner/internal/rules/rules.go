@@ -86,7 +86,7 @@ func (r *BrokenInternalLinkRule) Evaluate(finding model.Finding) *model.RuleResu
 		return nil
 	}
 
-	msg := fmt.Sprintf("Broken internal link to %s (%s)", truncate(finding.TargetURL, 80), finding.ErrorClass)
+	msg := fmt.Sprintf("Broken internal link to %s (%s)", finding.TargetURL, finding.ErrorClass)
 	if finding.ErrorMessage != "" {
 		msg += ": " + finding.ErrorMessage
 	}
@@ -114,7 +114,7 @@ func (r *BrokenExternalLinkRule) Evaluate(finding model.Finding) *model.RuleResu
 		return nil
 	}
 
-	msg := fmt.Sprintf("Broken external link to %s (%s)", truncate(finding.TargetURL, 80), finding.ErrorClass)
+	msg := fmt.Sprintf("Broken external link to %s (%s)", finding.TargetURL, finding.ErrorClass)
 	if finding.ErrorMessage != "" {
 		msg += ": " + finding.ErrorMessage
 	}
@@ -146,7 +146,7 @@ func (r *BrokenImageRule) Evaluate(finding model.Finding) *model.RuleResult {
 		return nil
 	}
 
-	msg := fmt.Sprintf("Broken image %s (%s)", truncate(finding.TargetURL, 80), finding.ErrorClass)
+	msg := fmt.Sprintf("Broken image %s (%s)", finding.TargetURL, finding.ErrorClass)
 	if finding.ErrorMessage != "" {
 		msg += ": " + finding.ErrorMessage
 	}
@@ -175,7 +175,7 @@ func (r *InvalidImageContentRule) Evaluate(finding model.Finding) *model.RuleRes
 	}
 
 	msg := fmt.Sprintf("Invalid image content type for %s: %s",
-		truncate(finding.TargetURL, 80), finding.ContentType)
+		finding.TargetURL, finding.ContentType)
 
 	return &model.RuleResult{
 		Code:      model.CodeInvalidImageContent,
