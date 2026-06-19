@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/four-flames/four-seo-check/runner/internal/config"
-	"github.com/four-flames/four-seo-check/runner/internal/crawl"
+	"github.com/four-flames/four-seo-check/runner/internal/orchestrator"
 	"github.com/four-flames/four-seo-check/runner/internal/logging"
 	"github.com/four-flames/four-seo-check/runner/internal/model"
 	"github.com/four-flames/four-seo-check/runner/internal/output"
@@ -53,7 +53,7 @@ func main() {
 	data, _ := json.Marshal(startEvt)
 	progressWriter.Write(append(data, '\n'))
 
-	crawler := crawl.New(*cfg, logger, progressWriter)
+	crawler := orchestrator.New(*cfg, logger, progressWriter)
 
 	timeoutPerPage := cfg.Timeout * 2
 	overallTimeout := time.Duration(cfg.MaxPages/cfg.Concurrency+10) * timeoutPerPage
