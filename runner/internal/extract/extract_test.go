@@ -148,6 +148,42 @@ func TestExtractImagesEmpty(t *testing.T) {
 	}
 }
 
+func TestImageClassMap(t *testing.T) {
+	htmlContent := `<html><body>
+<img class="product-image-placeholder" src="img1.jpg">
+<img class="hero-image main" src="img2.jpg">
+<img src="img3.jpg">
+<img class="" src="img4.jpg">
+</body></html>`
+
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL, _ := url.Parse("https://example.com/")
+
+	classMap := ImageClassMap(doc, baseURL)
+
+	if len(classMap) != 4 {
+		t.Fatalf("expected 4 images, got %d", len(classMap))
+	}
+
+	full1 := "https://example.com/img1.jpg"
+	if classMap[full1] != "product-image-placeholder" {
+		t.Errorf("img1 class = %q, want %q", classMap[full1], "product-image-placeholder")
+	}
+
+	full2 := "https://example.com/img2.jpg"
+	if classMap[full2] != "hero-image main" {
+		t.Errorf("img2 class = %q, want %q", classMap[full2], "hero-image main")
+	}
+
+	full3 := "https://example.com/img3.jpg"
+	if classMap[full3] != "" {
+		t.Errorf("img3 class = %q, want empty", classMap[full3])
+	}
+}
+
 func TestSrcSetDescriptors(t *testing.T) {
 	htmlContent := `<html><body>
 <img srcset="img-400.jpg 400w, img-800.jpg 800w, img-1200.jpg 1200w" src="img-400.jpg">

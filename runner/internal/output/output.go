@@ -492,5 +492,10 @@ func evaluatePageRules(page model.SEOAuditPage) []model.RuleResult {
 		results = append(results, *result)
 	}
 
+	imagePlaceholderRule := rules.NewImagePlaceholderRule()
+	if result := imagePlaceholderRule.EvaluatePage(page); result != nil {
+		results = append(results, *result)
+	}
+
 	return results
 }

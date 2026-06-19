@@ -41,6 +41,7 @@ func NewEngine() *Engine {
 	e.Register(&RobotsNoindexRule{})
 	e.Register(&StructuredDataInvalidRule{})
 	e.Register(NewProductImageSizeRule())
+	e.Register(NewImagePlaceholderRule())
 	return e
 }
 

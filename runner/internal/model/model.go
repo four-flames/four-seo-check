@@ -70,6 +70,7 @@ const (
 	CodeRobotsNoindex         IssueCode = "robots.noindex.detected"
 	CodeStructuredDataInvalid IssueCode = "structured_data.jsonld.invalid"
 	CodeProductImageTooSmall  IssueCode = "product.image.too_small"
+	CodeImagePlaceholder      IssueCode = "image.placeholder"
 )
 
 // RedirectHop records one step in a redirect chain.
@@ -237,6 +238,7 @@ type SEOAuditPage struct {
 	IsProductPage     bool          `json:"is_product_page"`
 	MainImageSrcSet   []SrcSetEntry `json:"main_image_srcset,omitempty"`
 	MainImageMaxWidth int           `json:"main_image_max_width,omitempty"`
+	PlaceholderImages []string      `json:"placeholder_images,omitempty"`
 }
 
 // SEOAuditResult is the top-level audit report.
